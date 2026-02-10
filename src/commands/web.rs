@@ -232,8 +232,9 @@ async fn sample_handler(
     // Transpose to rows, limited to sample_count
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(sample_count);
     for row_idx in 0..sample_count {
-        let row: Vec<serde_json::Value> = (0..num_cols)
-            .map(|col_idx| value_to_json(&decoded_columns[col_idx][row_idx]))
+        let row: Vec<serde_json::Value> = decoded_columns
+            .iter()
+            .map(|col| value_to_json(&col[row_idx]))
             .collect();
         rows.push(row);
     }

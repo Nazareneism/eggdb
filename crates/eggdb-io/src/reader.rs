@@ -94,8 +94,10 @@ pub fn hatch(
                 let mut stmt = tx.prepare(&insert_sql)?;
 
                 for row_idx in 0..row_count {
-                    let params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                        columns.iter().map(|col| value_to_sql_box(&col[row_idx])).collect();
+                    let params: Vec<Box<dyn rusqlite::types::ToSql>> = columns
+                        .iter()
+                        .map(|col| value_to_sql_box(&col[row_idx]))
+                        .collect();
 
                     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                         params.iter().map(|p| p.as_ref()).collect();
