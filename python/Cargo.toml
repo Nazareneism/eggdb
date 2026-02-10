@@ -1,0 +1,18 @@
+[package]
+name = "eggdb-python"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "_eggdb"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+eggdb-core = { path = "../crates/eggdb-core" }
+eggdb-vtable = { path = "../crates/eggdb-vtable" }
+eggdb-yql = { path = "../crates/eggdb-yql" }
+rusqlite = { version = "0.31", features = ["bundled", "vtab"] }
+zeroize = "1"

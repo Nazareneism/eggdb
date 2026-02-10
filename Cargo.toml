@@ -1,0 +1,64 @@
+[package]
+name = "egg"
+version = "0.1.0"
+edition = "2021"
+description = "A lifecycle-aware compressed database engine — converts SQLite to highly compressed .egg files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nazareneism/eggdb"
+
+[[bin]]
+name = "egg"
+path = "src/main.rs"
+
+[dependencies]
+eggdb-core = { path = "crates/eggdb-core" }
+eggdb-io = { path = "crates/eggdb-io" }
+eggdb-yql = { path = "crates/eggdb-yql" }
+eggdb-vtable = { path = "crates/eggdb-vtable" }
+bitvec = { workspace = true }
+rusqlite = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
+comfy-table = { workspace = true }
+colored = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+rustyline = "14"
+rpassword = "7"
+zeroize = { workspace = true }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[workspace]
+members = ["crates/eggdb-core", "crates/eggdb-io", "crates/eggdb-vtable", "crates/eggdb-yql"]
+exclude = ["fuzz", "python"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+bitvec = "1"
+zstd = "0.13"
+crc32c = "0.6"
+blake3 = "1"
+thiserror = "2"
+rusqlite = { version = "0.31", features = ["bundled", "blob", "vtab"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+comfy-table = "7"
+colored = "2"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde_json = "1"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.9"
+zeroize = "1"

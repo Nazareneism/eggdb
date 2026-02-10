@@ -1,0 +1,10 @@
+[package]
+name = "eggdb-yql"
+version = "0.1.0"
+edition = "2021"
+description = "YQL (Yolk Query Language) to SQL transpiler for EggDB"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nazareneism/eggdb"
+
+[dependencies]
+thiserror = { workspace = true }

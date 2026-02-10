@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "eggdb"
+version = "0.1.0"
+description = "Read and query compressed .egg database files"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT OR Apache-2.0"}
+authors = [{name = "Nazareneism"}]
+keywords = ["database", "compression", "sqlite", "columnar", "archival"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[project.urls]
+Repository = "https://github.com/Nazareneism/eggdb"
+Issues = "https://github.com/Nazareneism/eggdb/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module", "pyo3/abi3-py39"]
+module-name = "eggdb._eggdb"

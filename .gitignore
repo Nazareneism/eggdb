@@ -1,0 +1,52 @@
+# Build
+/target/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# Claude Code (keep .claude/rules/, agents/, skills/ — they're project config)
+.claude/settings.local.json
+.claude/agent-memory-local/
+.claude/projects/
+.claude/plans/
+.claude/tasks/
+.claude/teams/
+
+# Virtual environments
+.venv/
+python/.venv/
+
+# Python bindings build artifacts
+python/target/
+python/dist/
+python/*.whl
+python/**/__pycache__/
+python/**/*.egg-info/
+python/eggdb/*.so
+python/eggdb/*.pyd
+python/eggdb/*.dylib
+
+# Test fixtures (large files)
+tests/fixtures/*.db
+tests/fixtures/*.egg
+
+# Generated test outputs
+*.egg

@@ -1,0 +1,18 @@
+[package]
+name = "eggdb-io"
+version = "0.1.0"
+edition = "2021"
+description = "SQLite to .egg conversion (lay/hatch) for EggDB"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nazareneism/eggdb"
+
+[dependencies]
+eggdb-core = { path = "../eggdb-core" }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+bitvec = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3"

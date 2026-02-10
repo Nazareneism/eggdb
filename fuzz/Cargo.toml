@@ -1,0 +1,31 @@
+[package]
+name = "eggdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.eggdb-core]
+path = "../crates/eggdb-core"
+
+[dependencies.eggdb-yql]
+path = "../crates/eggdb-yql"
+
+[[bin]]
+name = "fuzz_egg_reader"
+path = "fuzz_targets/fuzz_egg_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_yql_parser"
+path = "fuzz_targets/fuzz_yql_parser.rs"
+test = false
+doc = false
+bench = false

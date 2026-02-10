@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EggDB Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    background: #1a1b26; color: #a9b1d6; line-height: 1.6;
+    padding: 20px; max-width: 1200px; margin: 0 auto;
+  }
+  h1 { color: #7aa2f7; font-size: 1.4em; margin-bottom: 4px; }
+  h2 { color: #bb9af7; font-size: 1.1em; margin: 20px 0 10px; }
+  h3 { color: #7dcfff; font-size: 1em; margin: 16px 0 8px; }
+  .header { border-bottom: 1px solid #33467c; padding-bottom: 12px; margin-bottom: 16px; }
+  .subtitle { color: #565f89; font-size: 0.85em; }
+  .stats { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+  .stat {
+    background: #24283b; border: 1px solid #33467c; border-radius: 6px;
+    padding: 10px 16px; min-width: 140px;
+  }
+  .stat-label { color: #565f89; font-size: 0.75em; text-transform: uppercase; }
+  .stat-value { color: #c0caf5; font-size: 1.2em; font-weight: bold; }
+  table {
+    width: 100%; border-collapse: collapse; margin: 8px 0;
+    background: #24283b; border-radius: 6px; overflow: hidden;
+  }
+  th {
+    text-align: left; padding: 8px 12px; background: #1f2335;
+    color: #7aa2f7; font-size: 0.8em; text-transform: uppercase;
+    border-bottom: 1px solid #33467c;
+  }
+  td {
+    padding: 6px 12px; border-bottom: 1px solid #292e42;
+    font-size: 0.85em; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  tr:hover td { background: #292e42; }
+  .clickable { color: #7aa2f7; cursor: pointer; text-decoration: underline; }
+  .clickable:hover { color: #89b4fa; }
+  button {
+    background: #33467c; color: #c0caf5; border: none; border-radius: 4px;
+    padding: 4px 10px; cursor: pointer; font-family: inherit; font-size: 0.8em;
+  }
+  button:hover { background: #3d5a9e; }
+  .back-btn { margin-bottom: 12px; }
+  #detail, #sample-section { display: none; }
+  canvas { background: #24283b; border-radius: 6px; margin: 12px 0; }
+  .loading { color: #565f89; font-style: italic; }
+  .badge {
+    display: inline-block; padding: 2px 6px; border-radius: 3px;
+    font-size: 0.75em; font-weight: bold;
+  }
+  .badge-green { background: #1a3a2a; color: #9ece6a; }
+  .badge-yellow { background: #3a3520; color: #e0af68; }
+  .badge-red { background: #3a1a1a; color: #f7768e; }
+  .ddl { background: #1f2335; padding: 10px; border-radius: 4px; font-size: 0.8em;
+    white-space: pre-wrap; word-break: break-all; color: #9ece6a; margin: 8px 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>EggDB Viewer</h1>
+  <div class="subtitle" id="file-path"></div>
+</div>
+
+<div id="overview">
+  <div class="stats" id="summary-stats"></div>
+  <h2>Tables</h2>
+  <canvas id="chart" width="800" height="100"></canvas>
+  <table id="tables-table">
+    <thead>
+      <tr>
+        <th>Table</th>
+        <th>Rows</th>
+        <th>Columns</th>
+        <th>Compressed</th>
+        <th>Uncompressed</th>
+        <th>Ratio</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="tables-body"></tbody>
+  </table>
+</div>
+
+<div id="detail">
+  <button class="back-btn" onclick="showOverview()">&larr; Back to overview</button>
+  <h2 id="detail-title"></h2>
+  <div class="ddl" id="detail-ddl"></div>
+  <h3>Columns</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Encoding</th>
+        <th>Cardinality</th>
+        <th>Nulls</th>
+        <th>Compressed</th>
+        <th>Uncompressed</th>
+        <th>Min</th>
+        <th>Max</th>
+      </tr>
+    </thead>
+    <tbody id="columns-body"></tbody>
+  </table>
+
+  <div id="sample-section">
+    <h3>Sample Data (first 100 rows)</h3>
+    <table>
+      <thead><tr id="sample-header"></tr></thead>
+      <tbody id="sample-body"></tbody>
+    </table>
+  </div>
+  <button onclick="loadSample()" id="sample-btn" style="margin-top: 12px">Load Sample Data</button>
+</div>
+
+<script>
+const KB = 1024, MB = 1024*KB, GB = 1024*MB;
+function fmtSize(b) {
+  if (b >= GB) return (b/GB).toFixed(2)+' GB';
+  if (b >= MB) return (b/MB).toFixed(2)+' MB';
+  if (b >= KB) return (b/KB).toFixed(2)+' KB';
+  return b+' B';
+}
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+let currentTable = '';
+let tablesData = [];
+
+async function init() {
+  const [summary, tables] = await Promise.all([
+    fetch('/api/summary').then(r => r.json()),
+    fetch('/api/tables').then(r => r.json())
+  ]);
+  tablesData = tables;
+
+  document.getElementById('file-path').textContent = summary.file_path;
+
+  const statsEl = document.getElementById('summary-stats');
+  const items = [
+    ['File Size', summary.file_size_human],
+    ['Original Size', summary.original_size_human],
+    ['Compression', summary.compression_ratio],
+    ['Tables', summary.table_count],
+    ['Total Rows', summary.total_rows.toLocaleString()],
+    ['Created', summary.created_at],
+    ['Version', summary.version],
+    ['Encrypted', summary.encrypted ? 'Yes' : 'No'],
+    ['Row Order', summary.row_order_preserved ? 'Preserved' : 'Reordered'],
+  ];
+  statsEl.innerHTML = items.map(([l,v]) =>
+    `<div class="stat"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`
+  ).join('');
+
+  const tbody = document.getElementById('tables-body');
+  tbody.innerHTML = tables.map(t => {
+    const ratio = t.total_compressed_size > 0
+      ? (t.total_uncompressed_size / t.total_compressed_size).toFixed(1) + 'x'
+      : 'N/A';
+    return `<tr>
+      <td><span class="clickable" onclick="showTable('${esc(t.name)}')">${esc(t.name)}</span></td>
+      <td>${t.row_count.toLocaleString()}</td>
+      <td>${t.column_count}</td>
+      <td>${fmtSize(t.total_compressed_size)}</td>
+      <td>${fmtSize(t.total_uncompressed_size)}</td>
+      <td>${ratio}</td>
+      <td><button onclick="showTable('${esc(t.name)}')">Detail</button></td>
+    </tr>`;
+  }).join('');
+
+  drawChart(tables);
+}
+
+function drawChart(tables) {
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (tables.length === 0) return;
+  const maxSize = Math.max(...tables.map(t => t.total_uncompressed_size), 1);
+  const barH = Math.min(24, (h - 20) / tables.length);
+  const gap = 4;
+  const labelW = 120;
+  const barArea = w - labelW - 20;
+
+  const colors = ['#7aa2f7','#bb9af7','#9ece6a','#e0af68','#f7768e','#7dcfff','#ff9e64'];
+
+  tables.forEach((t, i) => {
+    const y = 10 + i * (barH + gap);
+    const compW = (t.total_compressed_size / maxSize) * barArea;
+    const uncompW = (t.total_uncompressed_size / maxSize) * barArea;
+    const color = colors[i % colors.length];
+
+    ctx.fillStyle = '#33467c';
+    ctx.fillRect(labelW, y, uncompW, barH);
+    ctx.fillStyle = color;
+    ctx.fillRect(labelW, y, compW, barH);
+
+    ctx.fillStyle = '#a9b1d6';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t.name, labelW - 8, y + barH/2);
+  });
+}
+
+async function showTable(name) {
+  currentTable = name;
+  document.getElementById('overview').style.display = 'none';
+  document.getElementById('detail').style.display = 'block';
+  document.getElementById('sample-section').style.display = 'none';
+  document.getElementById('sample-btn').style.display = '';
+
+  let data;
+  try {
+    const r = await fetch(`/api/table/${encodeURIComponent(name)}`);
+    if (!r.ok) throw new Error(`Server returned ${r.status}`);
+    data = await r.json();
+  } catch(e) {
+    document.getElementById('detail-title').textContent = name;
+    document.getElementById('columns-body').innerHTML =
+      `<tr><td colspan="9" style="color:#f7768e">Failed to load: ${e.message}</td></tr>`;
+    return;
+  }
+
+  document.getElementById('detail-title').textContent = `${data.name} (${data.row_count.toLocaleString()} rows)`;
+  document.getElementById('detail-ddl').textContent = data.ddl;
+
+  const tbody = document.getElementById('columns-body');
+  tbody.innerHTML = data.columns.map(c => {
+    const ratio = c.compressed_size > 0
+      ? (c.uncompressed_size / c.compressed_size).toFixed(1) + 'x'
+      : '';
+    return `<tr>
+      <td>${esc(c.name)}</td>
+      <td>${esc(c.sqlite_type)}</td>
+      <td><span class="badge badge-green">${esc(c.encoding)}</span></td>
+      <td>${c.cardinality.toLocaleString()}</td>
+      <td>${c.null_count.toLocaleString()}</td>
+      <td>${fmtSize(c.compressed_size)}</td>
+      <td>${fmtSize(c.uncompressed_size)} ${ratio ? '('+ratio+')' : ''}</td>
+      <td>${c.min_value !== null ? esc(c.min_value) : ''}</td>
+      <td>${c.max_value !== null ? esc(c.max_value) : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadSample() {
+  document.getElementById('sample-btn').style.display = 'none';
+  document.getElementById('sample-section').style.display = 'block';
+  document.getElementById('sample-body').innerHTML = '<tr><td colspan="99" class="loading">Decoding sample data...</td></tr>';
+
+  try {
+    const r = await fetch(`/api/sample/${encodeURIComponent(currentTable)}`);
+    if (!r.ok) throw new Error(`Server returned ${r.status}`);
+    const data = await r.json();
+
+    const headerRow = document.getElementById('sample-header');
+    headerRow.innerHTML = data.columns.map(c => `<th>${esc(c)}</th>`).join('');
+
+    const tbody = document.getElementById('sample-body');
+    tbody.innerHTML = data.rows.map(row =>
+      '<tr>' + row.map(v => {
+        const display = v === null ? '<span style="color:#565f89">NULL</span>' : esc(v);
+        return `<td>${display}</td>`;
+      }).join('') + '</tr>'
+    ).join('');
+  } catch(e) {
+    document.getElementById('sample-body').innerHTML =
+      `<tr><td colspan="99" style="color:#f7768e">Failed to load sample: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function showOverview() {
+  document.getElementById('overview').style.display = '';
+  document.getElementById('detail').style.display = 'none';
+}
+
+init();
+</script>
+</body>
+</html>

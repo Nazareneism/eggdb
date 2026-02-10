@@ -1,0 +1,29 @@
+[package]
+name = "eggdb-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for the .egg file format — encodings, format reader/writer, validation, encryption"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nazareneism/eggdb"
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+bitvec = { workspace = true }
+zstd = { workspace = true }
+crc32c = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "encoding"
+harness = false
+path = "../../benches/encoding.rs"
