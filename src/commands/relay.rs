@@ -76,21 +76,18 @@ pub fn run(
     for (table_idx, table_meta) in tables.iter().enumerate() {
         let mut column_inputs = Vec::with_capacity(table_meta.columns.len());
 
-        for (col_idx, col_meta) in table_meta.columns.iter().enumerate() {
+        // Decode all columns in parallel
+        let all_values = reader
+            .decode_all_columns_parallel(table_idx)
+            .with_context(|| format!("failed to decode table '{}'", table_meta.table_name))?;
+
+        for (col_meta, values) in table_meta.columns.iter().zip(all_values.into_iter()) {
             spinner.set_message(format!(
                 "Relaying {} — {}.{} ...",
                 egg_path.file_name().unwrap_or_default().to_string_lossy(),
                 table_meta.table_name,
                 col_meta.name
             ));
-
-            // Decode the full column (including nulls)
-            let values = reader.decode_column(table_idx, col_idx).with_context(|| {
-                format!(
-                    "failed to decode column {}.{}",
-                    table_meta.table_name, col_meta.name
-                )
-            })?;
 
             // Re-analyze and select encoding
             let stats = analyze_column(&values);

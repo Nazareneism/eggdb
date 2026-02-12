@@ -63,17 +63,10 @@ fn crack_csv(
             continue;
         }
 
-        // Decode all columns
-        let mut columns: Vec<Vec<Value>> = Vec::with_capacity(num_cols);
-        for col_idx in 0..num_cols {
-            let col_values = reader.decode_column(table_idx, col_idx).with_context(|| {
-                format!(
-                    "failed to decode column '{}' in table '{}'",
-                    table.columns[col_idx].name, table.table_name
-                )
-            })?;
-            columns.push(col_values);
-        }
+        // Decode all columns in parallel
+        let columns = reader
+            .decode_all_columns_parallel(table_idx)
+            .with_context(|| format!("failed to decode table '{}'", table.table_name))?;
 
         // Transpose and write rows
         for row_idx in 0..row_count {
@@ -121,17 +114,10 @@ fn crack_json(
         let mut rows_json = Vec::with_capacity(row_count);
 
         if row_count > 0 && num_cols > 0 {
-            // Decode all columns
-            let mut columns: Vec<Vec<Value>> = Vec::with_capacity(num_cols);
-            for col_idx in 0..num_cols {
-                let col_values = reader.decode_column(table_idx, col_idx).with_context(|| {
-                    format!(
-                        "failed to decode column '{}' in table '{}'",
-                        table.columns[col_idx].name, table.table_name
-                    )
-                })?;
-                columns.push(col_values);
-            }
+            // Decode all columns in parallel
+            let columns = reader
+                .decode_all_columns_parallel(table_idx)
+                .with_context(|| format!("failed to decode table '{}'", table.table_name))?;
 
             // Transpose to rows
             for row_idx in 0..row_count {

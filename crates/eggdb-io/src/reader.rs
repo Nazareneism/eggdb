@@ -67,12 +67,8 @@ pub fn hatch(
         let num_cols = table_meta.columns.len();
 
         if row_count > 0 && num_cols > 0 {
-            // Decode all columns
-            let mut columns: Vec<Vec<Value>> = Vec::with_capacity(num_cols);
-            for col_idx in 0..num_cols {
-                let col_values = reader.decode_column(table_idx, col_idx)?;
-                columns.push(col_values);
-            }
+            // Decode all columns in parallel
+            let columns = reader.decode_all_columns_parallel(table_idx)?;
 
             // Build the INSERT statement
             let quoted_table = quote_identifier(&table_meta.table_name);

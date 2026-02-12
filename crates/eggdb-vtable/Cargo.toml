@@ -18,6 +18,7 @@ rusqlite = { workspace = true }
 bitvec = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

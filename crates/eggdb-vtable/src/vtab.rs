@@ -570,23 +570,40 @@ unsafe impl VTabCursor for EggCursor<'_> {
 
         self.row_mask = combined_mask;
 
-        // Decode needed columns
-        for (i, (&needed, col_slot)) in need_decode.iter().zip(self.columns.iter_mut()).enumerate()
-        {
-            if needed {
+        // Decode needed columns in parallel
+        use rayon::prelude::*;
+
+        // Initialize all slots to None
+        for col_slot in self.columns.iter_mut() {
+            *col_slot = None;
+        }
+
+        // Collect indices that need decoding
+        let needed_indices: Vec<usize> = need_decode
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &needed)| if needed { Some(i) } else { None })
+            .collect();
+
+        // Decode needed columns in parallel
+        let decoded_results: Result<Vec<(usize, Vec<Value>)>, Error> = needed_indices
+            .par_iter()
+            .map(|&i| {
                 let col_meta = &table_meta.columns[i];
-                let decoded = decode_column_from_parts_with_key(
+                decode_column_from_parts_with_key(
                     &file_data.data,
                     file_data.header.yolk_offset,
                     col_meta,
                     table_meta.row_count,
                     file_data.encryption_key.as_deref(),
                 )
-                .map_err(|e| Error::ModuleError(format!("failed to decode column {i}: {e}")))?;
-                *col_slot = Some(decoded);
-            } else {
-                *col_slot = None;
-            }
+                .map(|decoded| (i, decoded))
+                .map_err(|e| Error::ModuleError(format!("failed to decode column {i}: {e}")))
+            })
+            .collect();
+
+        for (i, decoded) in decoded_results? {
+            self.columns[i] = Some(decoded);
         }
 
         // Start at first matching row

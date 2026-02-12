@@ -786,7 +786,7 @@ Measured on bible.eng.db (1.5 GB, 11 tables, 1,497,017 rows). Release build, App
 | Default (zstd 3) | 292.91 MB | **5.1x** | 12.4s |
 | `--adaptive-compression` | 254.29 MB | **5.9x** | 21.7s |
 | `--zstd-level 19` | 176.78 MB | **8.5x** | 7m 10s |
-| `--zstd-level 19 --adaptive-compression` | 176.92 MB | **8.5x** | 6m 22s |
+| `--zstd-level 19 --adaptive-compression` | 176.92 MB | **8.5x** | 5m 40s |
 | `--optimize-order` | 292.91 MB | **5.1x** | 12.0s |
 
 Note: `--optimize-order` shows no improvement on this dataset because the dominant
@@ -875,23 +875,132 @@ datasets with low-cardinality columns where grouping improves RLE/Delta selectio
 
 ### v0.3 — Write Support
 
-Write support follows an append + compaction model (standard for columnar formats):
+Write support follows an append + compaction model, similar to LSM-trees and
+columnar databases like ClickHouse. The key insight: writes go fast into a
+lightly-compressed buffer, reads check both buffer and main file, and periodic
+compaction recovers full compression ratios.
 
-- **Append mode**: New rows go into a sidecar buffer (small .egg or WAL-like file).
-  `egg relay` merges the buffer into the main file (compaction). The virtual table
-  reads from both the main file and the buffer, presenting a unified view.
+#### Write Buffer Architecture
 
-- **Delete bitmaps**: A bitset marking rows as logically deleted without rewriting
-  column data. Stored in the membrane section or a sidecar. Queries skip deleted
-  rows. Compaction reclaims space by rewriting without deleted rows.
+```
+                 ┌─────────────┐
+  INSERT ──────► │ Hot Buffer  │  (zstd-only, no encoding analysis)
+                 │ .egg.wal    │  Fast writes, moderate compression (~2-3x)
+                 └──────┬──────┘
+                        │ compaction (egg relay --compact)
+                        ▼
+                 ┌─────────────┐
+                 │ Cold Main   │  (full encoding + zstd, 5-8x)
+                 │ data.egg    │  Optimal compression, read-optimized
+                 └─────────────┘
 
-- **Schema evolution**: Add a nullable column without rewriting existing data. The
-  new column is represented as all-null until the next compaction/relay adds real
-  values. Drop column = mark as deprecated in albumen, skip during decode.
+  Query ──► Virtual table reads BOTH, returns unified results
+            Buffer rows appear after main file rows
+```
 
-- **Write-through virtual table**: `INSERT`/`UPDATE`/`DELETE` via xUpdate. Built on
-  append mode + delete bitmaps. UPDATE = delete old row + append new row. Requires
-  all three primitives above.
+**Hot buffer** (`data.egg.wal`):
+- A valid `.egg` file sitting next to the main file (reuses existing format)
+- New rows are appended here with Raw encoding + zstd (no column analysis)
+- Fast writes: skip the analysis pass entirely, just serialize and compress
+- Moderate compression (~2-3x from zstd alone vs 5-8x with full encoding)
+- Header flag `is_buffer = true` distinguishes it from a standalone `.egg`
+- File size cap (configurable, default 64 MB). When exceeded, auto-compact
+
+**Cold main file** (`data.egg`):
+- The fully optimized `.egg` with proper encoding selection per column
+- Read-only between compactions. Never modified in-place.
+- Compaction produces a new main file, then atomic-renames it
+
+**Compaction** (`egg relay --compact` or automatic on buffer cap):
+1. Read all rows from main file + buffer
+2. Run full column analysis on the combined dataset
+3. Select optimal encodings, encode, compress
+4. Write new main file. Atomic-rename over the old one.
+5. Delete the buffer file
+6. Result: single optimized `.egg` with full compression ratio restored
+
+**Virtual table unified reads**:
+- `xConnect` checks for `<path>.wal` alongside the main file
+- If buffer exists, open both. Main file columns decoded normally.
+- Buffer columns appended after main file rows in query results.
+- Filter push-down works on both: main file uses encoding-level filters,
+  buffer falls back to decode-then-filter (still fast, it's small)
+- `xFilter` merges row masks from both sources
+
+**Concurrency model**:
+- Single writer (same as SQLite's default). Writes go to buffer only.
+- Multiple concurrent readers. Buffer is append-only, so readers see a
+  consistent snapshot (rows present at read start).
+- No WAL locking needed — the buffer is a separate file, readers open
+  it read-only. Writer appends atomically (whole rows at a time).
+- Compaction acquires an exclusive lock briefly for the rename.
+
+#### Delete Bitmaps
+
+A bitset marking rows as logically deleted without rewriting column data.
+
+- Stored in a sidecar file (`data.egg.del`) as a simple bitset: one bit per
+  row across all tables. Format: `[table_index: u32, row_count: u64, bitmap: bytes]`.
+- Queries skip deleted rows. The virtual table ANDs the delete bitmap with
+  the row mask before iterating.
+- `IS NULL` / `IS NOT NULL` filters account for deleted rows.
+- Compaction reclaims space by rewriting without deleted rows and resetting
+  the delete bitmap.
+- `egg info` reports "live rows" vs "total rows" when deletes are present.
+
+#### Schema Evolution
+
+- **Add column**: Append a new `ColumnMeta` to the albumen with
+  `null_count = row_count` and encoding `Const` (value = Null). No yolk
+  data written. The column is all-null until the next compaction adds real
+  values from the buffer.
+- **Drop column**: Mark as deprecated in albumen (`deprecated: bool` field).
+  Readers skip deprecated columns. Compaction omits them entirely,
+  reclaiming the yolk space.
+- **Rename column**: Metadata-only change in the albumen. No data rewrite.
+- Schema changes are recorded in the buffer's albumen. Compaction merges
+  the schema changes into the new main file.
+
+#### Write-Through Virtual Table
+
+`INSERT`/`UPDATE`/`DELETE` via SQLite's `xUpdate`:
+
+- **INSERT**: Serialize the row, append to the hot buffer. Return immediately.
+- **DELETE**: Set the bit in the delete bitmap. No data rewrite.
+- **UPDATE**: Delete old row (set delete bit) + insert new row (append to buffer).
+  Equivalent to DELETE + INSERT. No in-place update.
+- Requires all three primitives above (buffer, delete bitmaps, schema evolution).
+- `xUpdate` is only available when the `.egg` file is opened in read-write mode.
+  Read-only mode (default) rejects writes with a clear error.
+
+#### CLI Commands
+
+```bash
+egg append <file.egg> <source.sqlite>    # Append rows from SQLite to buffer
+egg compact <file.egg>                   # Merge buffer into main file
+egg delete <file.egg> "<where clause>"   # Mark rows as deleted
+egg gc <file.egg>                        # Compact + reclaim deleted rows
+```
+
+#### Performance Targets
+
+| Operation | Target | Notes |
+|-----------|--------|-------|
+| Append (per row) | < 10 µs | Raw + zstd only, no analysis |
+| Buffer read overhead | < 5% | Small buffer, decoded in memory |
+| Compaction (1M rows) | ~ lay time | Same pipeline as `egg lay` |
+| Delete (per row) | < 1 µs | Single bit flip |
+
+#### Open Design Questions
+
+- **Buffer format**: Reuse `.egg` format (simpler, reuses reader) vs custom
+  append-optimized format (faster writes, no column blocks overhead). Starting
+  with `.egg` format — correctness over performance. Optimize later if needed.
+- **Auto-compaction threshold**: Fixed size (64 MB)? Row count ratio
+  (buffer > 10% of main)? Time-based? Start with size cap, add heuristics later.
+- **Concurrent compaction**: Can reads continue during compaction? Yes — readers
+  hold the old main file open. The rename is atomic. New readers get the new file.
+  Old readers finish with the old file. Zero-downtime compaction.
 
 ### Exploring
 
@@ -911,9 +1020,9 @@ Write support follows an append + compaction model (standard for columnar format
   adaptive based on column cardinality? Fixed is simpler; adaptive compresses
   better but complicates the format.
 
-- **Append buffer format**: Separate .egg file, or a custom lightweight format?
-  Separate .egg is simpler (reuse existing reader) but means two files on disk.
-  A WAL-style single file is cleaner UX but more implementation work.
+- **Append buffer format**: Decided: reuse `.egg` format for the buffer (`.egg.wal`).
+  Simpler implementation, reuses existing reader/writer. Two files on disk is
+  acceptable — the buffer is temporary and merged on compaction.
 
 - **bincode v1 → v2 migration**: If bincode v2 becomes necessary in the future,
   that's a new format version (version byte = 2). No in-place migration — old

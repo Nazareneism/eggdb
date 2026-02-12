@@ -139,6 +139,34 @@ pub fn decode_column_from_parts_with_key(
     null_bitmap::interleave_nulls(&non_null_values, &null_bitmap)
 }
 
+/// Decode multiple columns of a table in parallel.
+///
+/// Each column block is independently decompressed and decoded using rayon's
+/// parallel iterator. Returns one `Vec<Value>` per column, in the same order
+/// as the input `columns` slice.
+#[cfg(feature = "parallel")]
+pub fn decode_columns_parallel(
+    file_data: &[u8],
+    yolk_section_offset: u64,
+    columns: &[ColumnMeta],
+    row_count: u64,
+    encryption_key: Option<&[u8; 32]>,
+) -> Result<Vec<Vec<Value>>, FormatError> {
+    use rayon::prelude::*;
+    columns
+        .par_iter()
+        .map(|col_meta| {
+            decode_column_from_parts_with_key(
+                file_data,
+                yolk_section_offset,
+                col_meta,
+                row_count,
+                encryption_key,
+            )
+        })
+        .collect()
+}
+
 /// A reader for `.egg` file data held in memory.
 ///
 /// Parses the header, albumen (metadata), and membrane (integrity) sections
@@ -312,6 +340,27 @@ impl<'a> EggReader<'a> {
             self.data,
             self.header.yolk_offset,
             col,
+            table.row_count,
+            self.encryption_key.as_deref(),
+        )
+    }
+
+    /// Decode all columns of a table in parallel.
+    ///
+    /// Uses rayon to decompress and decode every column concurrently.
+    /// Returns one `Vec<Value>` per column, in column order.
+    #[cfg(feature = "parallel")]
+    pub fn decode_all_columns_parallel(
+        &self,
+        table_idx: usize,
+    ) -> Result<Vec<Vec<Value>>, FormatError> {
+        let table = self.tables.get(table_idx).ok_or_else(|| {
+            FormatError::InvalidOffset(format!("table index {table_idx} out of range"))
+        })?;
+        decode_columns_parallel(
+            self.data,
+            self.header.yolk_offset,
+            &table.columns,
             table.row_count,
             self.encryption_key.as_deref(),
         )

@@ -7,6 +7,8 @@ pub use format::albumen::{ColumnMeta, TableMeta};
 pub use format::crypto::{decrypt_block, derive_key, encrypt_block, generate_salt, SALT_SIZE};
 pub use format::header::{Header, HeaderFlags};
 pub use format::membrane::{BlockChecksum, Membrane};
+#[cfg(feature = "parallel")]
+pub use format::reader::decode_columns_parallel;
 pub use format::reader::{
     decode_column_from_parts, decode_column_from_parts_with_key, encoder_for,
     read_column_block_from_parts, read_column_block_from_parts_with_key, EggReader,

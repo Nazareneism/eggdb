@@ -332,13 +332,13 @@ Measured on `bible.eng.db` (1.5 GB SQLite, 11 tables, 1,497,017 rows). Apple Sil
 | Default (zstd 3) | 293 MB | **5.1x** | 12.2s |
 | `--adaptive-compression` | 254 MB | **5.9x** | 21.7s |
 | `--zstd-level 19` | 177 MB | **8.5x** | 7m 10s |
-| `--zstd-level 19 --adaptive-compression` | 177 MB | **8.5x** | 6m 22s |
+| `--zstd-level 19 --adaptive-compression` | 177 MB | **8.5x** | 5m 40s |
 
 | Operation | Time |
 |-----------|------|
-| Hatch (.egg -> SQLite) | 6.9s |
+| Hatch (.egg -> SQLite) | 6.3s |
 | Validate (176 checks) | 0.09s |
-| Test suite (unit + property + integration) | 440 tests |
+| Test suite (unit + property + integration) | 470 tests |
 | Fuzz (egg reader + YQL parser) | ~6M inputs, 0 crashes |
 
 Encoding micro-benchmarks (100K values, Criterion):
@@ -366,7 +366,7 @@ so `candle`, `info`, and `schema` work without a passphrase.
 
 ```bash
 cargo build --release          # CLI binary
-cargo test --workspace         # Run all 440 tests
+cargo test --workspace         # Run all 470 tests
 cargo clippy -- -D warnings    # Lint
 cargo bench -p eggdb-core      # Encoding benchmarks
 cargo +nightly fuzz run fuzz_egg_reader   # Fuzz the .egg reader
@@ -387,9 +387,10 @@ Fuzz testing requires the nightly toolchain (`rustup install nightly`).
 - YQL query language transpiler
 - AES-256-GCM encryption with Argon2id key derivation
 - Streaming lay, incremental lay, adaptive compression, row reordering
+- Parallel column decoding via rayon (multi-core speedup on hatch/query/crack)
 - Web viewer for browsing .egg files in a browser
 - Python bindings (`pip install eggdb`)
-- 440 tests, fuzz testing, CI/CD
+- 470 tests, fuzz testing, CI/CD
 
 ### Next (v0.2) — Query Performance + Distribution
 
@@ -398,7 +399,6 @@ Fuzz testing requires the nightly toolchain (`rustup install nightly`).
   big speedup for range scans on large files.
 - **Predicate push-down improvements** — range scans on Delta columns, dict-aware
   filtering, leverage zone maps for early chunk elimination
-- **Parallel column decoding** — decompress multiple columns concurrently using rayon
 - **npm package** — distribute the SQLite extension for Node.js/Bun/Deno
 - **Homebrew formula** — `brew install eggdb`
 

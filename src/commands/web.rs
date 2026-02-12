@@ -217,17 +217,12 @@ async fn sample_handler(
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
 
     let column_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
-    let num_cols = table.columns.len();
     let sample_count = std::cmp::min(table.row_count as usize, 100);
 
-    // Decode all columns
-    let mut decoded_columns: Vec<Vec<eggdb_core::Value>> = Vec::with_capacity(num_cols);
-    for col_idx in 0..num_cols {
-        let values = reader
-            .decode_column(table_idx, col_idx)
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        decoded_columns.push(values);
-    }
+    // Decode all columns in parallel
+    let decoded_columns = reader
+        .decode_all_columns_parallel(table_idx)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Transpose to rows, limited to sample_count
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(sample_count);
