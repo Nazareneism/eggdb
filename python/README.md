@@ -8,7 +8,7 @@ This package lets you query them directly — no decompression step needed.
 ## Install
 
 ```bash
-pip install eggdb
+uv pip install eggdb
 ```
 
 ## Usage
@@ -55,9 +55,9 @@ To build from source and test locally:
 
 ```bash
 cd python
-python3 -m venv .venv
+uv venv
 source .venv/bin/activate
-pip install maturin
+uv pip install maturin
 maturin develop --release
 ```
 

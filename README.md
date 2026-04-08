@@ -124,7 +124,7 @@ egg hatch mydata.egg --tables users,orders -o partial.sqlite
 ### Install
 
 ```bash
-pip install eggdb
+uv pip install eggdb
 ```
 
 ### Opening and querying
@@ -315,7 +315,7 @@ crates/
   eggdb-vtable/   SQLite virtual table extension (cdylib). Column pruning, filter push-down.
   eggdb-yql/      YQL -> SQL transpiler. Pure string transform, no external deps.
 src/              CLI binary (clap). Thin wrappers around crate APIs.
-python/           Python package (PyO3 + maturin). pip install eggdb.
+python/           Python package (PyO3 + maturin). uv pip install eggdb.
 ```
 
 Crate boundaries are strict:
@@ -389,7 +389,7 @@ Fuzz testing requires the nightly toolchain (`rustup install nightly`).
 - Streaming lay, incremental lay, adaptive compression, row reordering
 - Parallel column decoding via rayon (multi-core speedup on hatch/query/crack)
 - Web viewer for browsing .egg files in a browser
-- Python bindings (`pip install eggdb`)
+- Python bindings (`uv pip install eggdb`)
 - 470 tests, fuzz testing, CI/CD
 
 ### Next (v0.2) — Query Performance + Distribution

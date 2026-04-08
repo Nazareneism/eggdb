@@ -50,3 +50,6 @@ tests/fixtures/*.egg
 
 # Generated test outputs
 *.egg
+
+# AI Web Search Reports
+docs/reports
