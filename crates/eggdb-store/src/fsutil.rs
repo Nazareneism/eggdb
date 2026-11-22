@@ -159,6 +159,7 @@ mod tests {
         std::fs::write(&tmp, b"two").unwrap();
         std::fs::rename(&tmp, &path).unwrap();
         let second = FileIdentity::of_path(&path).unwrap().unwrap();
+        assert_eq!(second.size(), 3);
         #[cfg(unix)]
         {
             assert!(!first.same_file(&second), "rename must yield a new inode");
