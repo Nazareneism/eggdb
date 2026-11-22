@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "egg"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-io"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bitvec",
  "eggdb-core",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eggdb-core",
  "tempfile",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-vtable"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bitvec",
  "eggdb-core",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-yql"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "thiserror",
 ]

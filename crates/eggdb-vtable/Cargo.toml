@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-vtable"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "SQLite virtual table extension for querying .egg files"
 license = "MIT OR Apache-2.0"

@@ -3,4 +3,4 @@
 from eggdb._eggdb import EggFile, open
 
 __all__ = ["EggFile", "open"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"

@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-yql"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "thiserror",
 ]

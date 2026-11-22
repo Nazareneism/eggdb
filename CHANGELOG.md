@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-22
+
+### Added
+
+- Windows wheels on PyPI (x64 and ARM64). Previously Windows users had to build from
+  source, which needs the Rust toolchain and Visual C++ Build Tools.
+- CI runs the full test suite on Windows.
+- The publish workflow installs and imports each natively built wheel before uploading,
+  so an unloadable wheel can never reach PyPI.
+
+### Changed
+
+- macOS wheels are built on `macos-15` (GitHub retired the `macos-14` runners).
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
