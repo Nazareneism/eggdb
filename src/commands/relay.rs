@@ -102,12 +102,18 @@ pub fn run(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Preserve encryption: if source was encrypted, re-encrypt with same key and a new salt
-    let (enc_key, enc_salt) = if let Some(key) = reader.encryption_key() {
-        let salt = eggdb_core::generate_salt();
-        (Some(eggdb_core::Zeroizing::new(*key)), Some(salt))
-    } else {
-        (None, None)
+    // Preserve encryption with a fresh salt. The key must be re-derived from
+    // the passphrase and the NEW salt: readers derive the key from the salt
+    // stored in the file, so reusing the old key would make the output
+    // impossible to decrypt.
+    let (enc_key, enc_salt) = match passphrase.filter(|_| reader.encryption_key().is_some()) {
+        Some(pass) => {
+            let salt = eggdb_core::generate_salt();
+            let key = eggdb_core::derive_key(pass, &salt)
+                .context("failed to derive encryption key for the relayed egg")?;
+            (Some(key), Some(salt))
+        }
+        None => (None, None),
     };
 
     let write_options = WriteOptions {
@@ -486,5 +492,38 @@ mod tests {
 
         assert_eq!(src_decoded, rel_decoded);
         assert_eq!(rel_decoded, values);
+    }
+
+    /// Relaying an encrypted egg must produce a file the same passphrase opens.
+    #[test]
+    fn relay_encrypted_egg_stays_readable_with_passphrase() {
+        let values: Vec<Value> = (0..50)
+            .map(|i| Value::Text(format!("secret-{i}")))
+            .collect();
+        let table = TableInput {
+            table_name: "s".into(),
+            row_count: values.len() as u64,
+            original_ddl: "CREATE TABLE s (v TEXT)".into(),
+            columns: vec![make_column("v", SqliteType::Text, &values)],
+            index_definitions: Vec::new(),
+        };
+        let salt = eggdb_core::generate_salt();
+        let key = eggdb_core::derive_key("pw", &salt).unwrap();
+        let options = WriteOptions {
+            flags: eggdb_core::HeaderFlags::new(true, true),
+            encryption_key: Some(key),
+            encryption_salt: Some(salt),
+            ..WriteOptions::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("enc.egg");
+        let out = dir.path().join("enc_relayed.egg");
+        std::fs::write(&src, write_egg(&[table], &options).unwrap()).unwrap();
+
+        super::run(&src, Some(&out), 3, Some("pw")).unwrap();
+
+        let relayed = std::fs::read(&out).unwrap();
+        let reader = EggReader::open_with_passphrase(&relayed, "pw").unwrap();
+        assert_eq!(reader.decode_column(0, 0).unwrap(), values);
     }
 }
