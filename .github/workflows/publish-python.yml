@@ -25,6 +25,12 @@ jobs:
             target: aarch64
           - os: macos-15
             target: x86_64
+          # Without Windows wheels, pip falls back to the sdist and needs the
+          # Rust toolchain plus the MSVC linker (Visual C++ Build Tools).
+          - os: windows-latest
+            target: x64
+          - os: windows-latest
+            target: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,7 +47,8 @@ jobs:
       # string pool"); a failing import here fails the job, which skips the
       # publish job. Only native targets can be imported on the build runner.
       - name: Smoke-test the wheel
-        if: (runner.os == 'macOS' && matrix.target == 'aarch64') || (runner.os == 'Linux' && matrix.target == 'x86_64')
+        if: (runner.os == 'macOS' && matrix.target == 'aarch64') || (runner.os == 'Linux' && matrix.target == 'x86_64') || (runner.os == 'Windows' && matrix.target == 'x64')
+        shell: bash
         run: |
           python -m pip install --no-index --find-links python/dist eggdb
           python -c "import eggdb; print('imported eggdb', eggdb.__version__)"
