@@ -12,7 +12,8 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 eggdb-core = { path = "../crates/eggdb-core" }
+eggdb-store = { path = "../crates/eggdb-store" }
 eggdb-vtable = { path = "../crates/eggdb-vtable" }
 eggdb-yql = { path = "../crates/eggdb-yql" }
-rusqlite = { version = "0.31", features = ["bundled", "vtab"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "vtab"] }
 zeroize = "1"

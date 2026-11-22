@@ -2,14 +2,13 @@ use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use bitvec::prelude::*;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use eggdb_core::encoding::analyzer::{analyze_column, select_encoding};
-use eggdb_core::encoding::null_bitmap;
-use eggdb_core::format::writer::{write_egg, ColumnInput, TableInput, WriteOptions};
-use eggdb_core::{encoder_for, EggReader, Header};
+use eggdb_core::format::writer::{write_egg, WriteOptions};
+use eggdb_core::{encode_table, Header};
+
+use crate::commands::pending::open_snapshot;
 
 use crate::format::{format_duration, format_ratio, format_size};
 
@@ -33,6 +32,9 @@ pub fn run(
     };
     let output = output.unwrap_or(&default_output);
 
+    // Never orphan pending changes of an existing egg at the output path
+    eggdb_store::ensure_no_pending_log(output)?;
+
     // Safety: never overwrite the source file
     if same_file(egg_path, output) {
         anyhow::bail!(
@@ -55,81 +57,43 @@ pub fn run(
 
     let start = Instant::now();
 
-    let data = std::fs::read(egg_path)
-        .with_context(|| format!("failed to read {}", egg_path.display()))?;
-    let reader = if let Some(pass) = passphrase {
-        EggReader::open_with_passphrase(&data, pass)
-            .with_context(|| format!("failed to parse encrypted {}", egg_path.display()))?
-    } else {
-        EggReader::open(&data).with_context(|| format!("failed to parse {}", egg_path.display()))?
-    };
+    // Relay output includes pending write-log changes (like a compaction
+    // into a new file); the source and its log are left untouched.
+    let reader = open_snapshot(egg_path, passphrase)?;
+    let data = reader.data();
 
     let source_header = reader.header().clone();
     let tables = reader.tables();
 
-    // Track encoding changes for summary
-    let mut encoding_changes: Vec<(String, String, String, String)> = Vec::new(); // (table, column, old, new)
+    // Track encoding changes for summary: (table, column, old, new)
+    let mut encoding_changes: Vec<(String, String, String, String)> = Vec::new();
 
-    // Build TableInputs by decoding each column and re-analyzing
+    // Decode each table (columns in parallel), then re-analyze and re-encode
     let mut table_inputs = Vec::with_capacity(tables.len());
-
     for (table_idx, table_meta) in tables.iter().enumerate() {
-        let mut column_inputs = Vec::with_capacity(table_meta.columns.len());
+        spinner.set_message(format!(
+            "Relaying {} — {} ...",
+            egg_path.file_name().unwrap_or_default().to_string_lossy(),
+            table_meta.table_name
+        ));
 
-        // Decode all columns in parallel
         let all_values = reader
-            .decode_all_columns_parallel(table_idx)
+            .visible_table(table_idx)
             .with_context(|| format!("failed to decode table '{}'", table_meta.table_name))?;
+        let table_input = encode_table(table_meta, reader.live_row_count(table_idx), all_values)
+            .with_context(|| format!("failed to re-encode table '{}'", table_meta.table_name))?;
 
-        for (col_meta, values) in table_meta.columns.iter().zip(all_values.into_iter()) {
-            spinner.set_message(format!(
-                "Relaying {} — {}.{} ...",
-                egg_path.file_name().unwrap_or_default().to_string_lossy(),
-                table_meta.table_name,
-                col_meta.name
-            ));
-
-            // Re-analyze and select encoding
-            let stats = analyze_column(&values);
-            let new_encoding = select_encoding(&stats);
-
-            if col_meta.encoding != new_encoding {
+        for (old, new) in table_meta.columns.iter().zip(&table_input.columns) {
+            if old.encoding != new.encoding {
                 encoding_changes.push((
                     table_meta.table_name.clone(),
-                    col_meta.name.clone(),
-                    col_meta.encoding.to_string(),
-                    new_encoding.to_string(),
+                    old.name.clone(),
+                    old.encoding.to_string(),
+                    new.encoding.to_string(),
                 ));
             }
-
-            // Build null bitmap and extract non-null values
-            let null_bitmap: BitVec = values.iter().map(|v| v.is_null()).collect();
-            let non_null_values = null_bitmap::extract_non_null(&values, &null_bitmap);
-            let encoder = encoder_for(new_encoding);
-            let encoded_values = encoder.encode(&non_null_values);
-
-            column_inputs.push(ColumnInput {
-                name: col_meta.name.clone(),
-                sqlite_type: col_meta.sqlite_type,
-                encoding: new_encoding,
-                cardinality: stats.distinct_count as u64,
-                null_count: stats.null_count as u64,
-                null_bitmap,
-                encoded_values,
-                dictionary: None,
-                min_value: stats.min_value,
-                max_value: stats.max_value,
-                pre_compressed: None,
-            });
         }
-
-        table_inputs.push(TableInput {
-            table_name: table_meta.table_name.clone(),
-            row_count: table_meta.row_count,
-            original_ddl: table_meta.original_ddl.clone(),
-            columns: column_inputs,
-            index_definitions: table_meta.index_definitions.clone(),
-        });
+        table_inputs.push(table_input);
     }
 
     // Write the new egg

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d39d96353c5bf2b4ed0c62180a73c13cc1ba294829bcbea5b2ee5afe5bee29a1 # shrinks to base_rows = [[Null, Null], [Null, Null]], actions = [Update(0, [Null, Null])], mask_seed = [false, false, false, false, false, false, false, false, false, false, false, false]

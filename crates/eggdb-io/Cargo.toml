@@ -8,6 +8,7 @@ repository = "https://github.com/Nazareneism/eggdb"
 
 [dependencies]
 eggdb-core = { path = "../eggdb-core" }
+eggdb-store = { path = "../eggdb-store" }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 bitvec = { workspace = true }

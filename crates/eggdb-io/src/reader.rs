@@ -2,8 +2,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use eggdb_core::EggReader;
 use eggdb_core::Value;
+use eggdb_store::EggSnapshot;
 
 use crate::sqlite_utils::quote_identifier;
 use crate::IoError;
@@ -23,27 +23,39 @@ pub struct HatchResult {
     pub total_rows: u64,
 }
 
-/// Reconstruct a SQLite database from .egg data.
+/// Reconstruct a SQLite database from in-memory .egg bytes.
 ///
-/// Reads the .egg format, creates tables from stored DDL, decodes all column
-/// data, transposes to rows, and bulk-inserts into the provided connection.
-/// Indexes are recreated after data insertion for performance.
+/// Bytes alone carry no write log, so pending changes in a `.egg.wal` file
+/// are not seen here. For files on disk use [`hatch_file`] or
+/// [`hatch_snapshot`], which include them.
 pub fn hatch(
     egg_data: &[u8],
     conn: &Connection,
     options: &HatchOptions,
 ) -> Result<HatchResult, IoError> {
-    let reader = if let Some(ref passphrase) = options.passphrase {
-        EggReader::open_with_passphrase(egg_data, passphrase)?
-    } else {
-        EggReader::open(egg_data)?
-    };
-    let tables = reader.tables();
+    let snapshot = EggSnapshot::from_parts(
+        Path::new("<in-memory egg>"),
+        egg_data.to_vec(),
+        None,
+        options.passphrase.as_deref(),
+    )?;
+    hatch_snapshot(&snapshot, conn, options)
+}
 
+/// Reconstruct a SQLite database from an egg snapshot (main file plus any
+/// pending write-log changes).
+///
+/// Creates tables from stored DDL, decodes the live rows, bulk-inserts them,
+/// recreates indexes, and verifies each table's row count.
+pub fn hatch_snapshot(
+    snapshot: &EggSnapshot,
+    conn: &Connection,
+    options: &HatchOptions,
+) -> Result<HatchResult, IoError> {
     let mut table_count = 0usize;
     let mut total_rows = 0u64;
 
-    for (table_idx, table_meta) in tables.iter().enumerate() {
+    for (table_idx, table_meta) in snapshot.tables().iter().enumerate() {
         // Skip tables not in the filter list
         if let Some(ref allowed) = options.tables {
             if !allowed.iter().any(|n| n == &table_meta.table_name) {
@@ -63,12 +75,13 @@ pub fn hatch(
         // Create the table from stored DDL (single statement only — no execute_batch)
         conn.execute(&table_meta.original_ddl, [])?;
 
-        let row_count = table_meta.row_count as usize;
+        let live_rows = snapshot.live_row_count(table_idx);
+        let row_count = live_rows as usize;
         let num_cols = table_meta.columns.len();
 
         if row_count > 0 && num_cols > 0 {
-            // Decode all columns in parallel
-            let columns = reader.decode_all_columns_parallel(table_idx)?;
+            // Decode all columns in parallel, with pending changes applied
+            let columns = snapshot.visible_table(table_idx)?;
 
             // Build the INSERT statement
             let quoted_table = quote_identifier(&table_meta.table_name);
@@ -120,15 +133,15 @@ pub fn hatch(
 
         // Verify row count
         let actual_count = crate::sqlite_utils::get_row_count(conn, &table_meta.table_name)?;
-        if actual_count != table_meta.row_count {
+        if actual_count != live_rows {
             return Err(IoError::Other(format!(
                 "row count mismatch for table '{}': expected {}, got {}",
-                table_meta.table_name, table_meta.row_count, actual_count
+                table_meta.table_name, live_rows, actual_count
             )));
         }
 
         table_count += 1;
-        total_rows += table_meta.row_count;
+        total_rows += live_rows;
     }
 
     Ok(HatchResult {
@@ -148,16 +161,14 @@ fn value_to_sql_box(value: &Value) -> Box<dyn rusqlite::types::ToSql> {
     }
 }
 
-/// Reconstruct a SQLite database file from an .egg file on disk.
-///
-/// Reads the .egg file, creates a new SQLite database at the output path,
-/// and calls [`hatch`] to populate it.
+/// Reconstruct a SQLite database file from an .egg file on disk, including
+/// any pending changes in its write log.
 pub fn hatch_file(
     egg_path: &Path,
     output: &Path,
     options: &HatchOptions,
 ) -> Result<HatchResult, IoError> {
-    let egg_data = std::fs::read(egg_path)?;
+    let snapshot = EggSnapshot::open(egg_path, options.passphrase.as_deref())?;
     let conn = Connection::open(output)?;
-    hatch(&egg_data, &conn, options)
+    hatch_snapshot(&snapshot, &conn, options)
 }

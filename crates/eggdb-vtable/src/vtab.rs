@@ -1,42 +1,41 @@
+use std::borrow::Cow;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::os::raw::c_int;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use bitvec::prelude::*;
 use rusqlite::ffi;
 use rusqlite::types::ValueRef;
 use rusqlite::vtab::{
-    read_only_module, Context, CreateVTab, IndexConstraintOp, IndexInfo, Module, VTab,
-    VTabConnection, VTabCursor, VTabKind, Values,
+    Context, CreateVTab, Filters, IndexConstraintOp, IndexInfo, Inserts, Module, TransactionVTab,
+    UpdateVTab, Updates, VTab, VTabConnection, VTabCursor, VTabKind,
 };
 use rusqlite::Error;
 
-use zeroize::Zeroizing;
-
 use eggdb_core::{
-    decode_column_from_parts_with_key, encoder_for, expand_non_null_indices,
-    read_column_block_from_parts_with_key, Encoding, FilterOp, Header, SqliteType, TableMeta,
-    Value,
+    encoder_for, expand_non_null_indices, read_column_block_from_parts_with_key, Encoding,
+    FilterOp, TableMeta, Value,
 };
+use eggdb_store::EggSnapshot;
 
+use crate::args::parse_args;
 use crate::column_cache::DecodedColumn;
+use crate::constraints::{from_value_ref, quote};
 use crate::error::VtableError;
-
-/// Parsed file data shared across vtable instances (via Arc).
-pub struct EggFileData {
-    pub data: Vec<u8>,
-    pub header: Header,
-    pub tables: Vec<TableMeta>,
-    pub encryption_key: Option<Zeroizing<[u8; 32]>>,
-}
+use crate::shared::{format_err, lock, store_err, ModuleState, SharedEgg};
 
 /// The virtual table implementation.
 #[repr(C)]
 pub struct EggTab {
     /// Must be first field for SQLite FFI.
     base: ffi::sqlite3_vtab,
-    file_data: Arc<EggFileData>,
+    /// State shared with every other egg table on this connection and file.
+    shared: Arc<Mutex<SharedEgg>>,
     table_idx: usize,
+    /// Opened with `mode=rw`.
+    writable: bool,
 }
 
 /// Op codes for filter constraints, encoded in idx_str.
@@ -124,40 +123,32 @@ fn estimate_cost(
     }
 }
 
-/// Build the CREATE TABLE statement for SQLite schema declaration.
+/// Build the CREATE TABLE statement declared to SQLite: names and types only.
+///
+/// Constraints and DEFAULT clauses would be pointless here: SQLite discards a
+/// virtual table's declared defaults and never enforces its constraints.
+/// Both are applied by the write path instead (see `constraints.rs`).
 fn build_schema_sql(table_meta: &TableMeta) -> String {
-    let mut sql = format!("CREATE TABLE \"{}\"(", table_meta.table_name);
-    for (i, col) in table_meta.columns.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        sql.push('"');
-        // Escape double quotes in column names
-        for ch in col.name.chars() {
-            if ch == '"' {
-                sql.push('"');
-            }
-            sql.push(ch);
-        }
-        sql.push('"');
-        sql.push(' ');
-        sql.push_str(&col.sqlite_type.to_string());
-    }
-    sql.push(')');
-    sql
+    let columns: Vec<String> = table_meta
+        .columns
+        .iter()
+        .map(|col| format!("{} {}", quote(&col.name), col.sqlite_type))
+        .collect();
+    format!(
+        "CREATE TABLE {}({})",
+        quote(&table_meta.table_name),
+        columns.join(", ")
+    )
 }
 
-/// Dequote a string argument (remove surrounding quotes).
-fn dequote(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
-            return &s[1..s.len() - 1];
-        }
-    }
-    s
+/// The schema to declare, as a C string.
+fn declared_schema(table_meta: &TableMeta) -> Result<CString, Error> {
+    CString::new(build_schema_sql(table_meta)).map_err(|_| {
+        Error::ModuleError(format!(
+            "table '{}' has a table or column name containing a NUL byte",
+            table_meta.table_name
+        ))
+    })
 }
 
 /// Parse a constraint plan from idx_str.
@@ -192,150 +183,66 @@ fn parse_idx_str(idx_str: &str) -> (u64, Vec<(usize, u8)>) {
     (col_used, constraints)
 }
 
-/// Convert a rusqlite ValueRef to our Value type.
-fn value_ref_to_value(vr: ValueRef<'_>) -> Value {
-    match vr {
-        ValueRef::Null => Value::Null,
-        ValueRef::Integer(i) => Value::Integer(i),
-        ValueRef::Real(f) => Value::Real(f),
-        ValueRef::Text(s) => {
-            let s = std::str::from_utf8(s).unwrap_or("");
-            Value::Text(s.to_string())
-        }
-        ValueRef::Blob(b) => Value::Blob(b.to_vec()),
+/// A non-negative rowid argument from SQLite.
+fn rowid_arg(v: Option<ValueRef<'_>>) -> Result<u64, Error> {
+    match v {
+        Some(ValueRef::Integer(i)) if i >= 0 => Ok(i as u64),
+        other => Err(Error::ModuleError(format!(
+            "egg tables use non-negative integer rowids, got {other:?}"
+        ))),
     }
 }
 
 // Safety: EggTab has #[repr(C)] with sqlite3_vtab as the first field,
 // which is required by the SQLite vtable API.
 unsafe impl<'vtab> VTab<'vtab> for EggTab {
-    type Aux = ();
+    type Aux = ModuleState;
     type Cursor = EggCursor<'vtab>;
 
     fn connect(
         _db: &mut VTabConnection,
-        _aux: Option<&()>,
+        aux: Option<&ModuleState>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _vtab_name: &[u8],
         args: &[&[u8]],
-    ) -> rusqlite::Result<(String, Self)> {
-        // args[0] = module name
-        // args[1] = database name
-        // args[2] = vtable name
-        // args[3] = egg file path
-        // args[4] = table name in egg
-        // args[5] = optional passphrase for encrypted eggs
-        if args.len() < 5 {
-            return Err(Error::ModuleError(format!(
-                "egg vtable requires 2 arguments (file path, table name), got {}",
-                args.len().saturating_sub(3)
-            )));
-        }
-
-        let file_path_raw = std::str::from_utf8(args[3])
-            .map_err(|e| Error::ModuleError(format!("invalid file path: {e}")))?;
-        let file_path = dequote(file_path_raw);
-
-        let table_name_raw = std::str::from_utf8(args[4])
-            .map_err(|e| Error::ModuleError(format!("invalid table name: {e}")))?;
-        let table_name = dequote(table_name_raw);
-
-        let passphrase = if args.len() >= 6 {
-            let pp_raw = std::str::from_utf8(args[5])
-                .map_err(|e| Error::ModuleError(format!("invalid passphrase: {e}")))?;
-            Some(dequote(pp_raw))
-        } else {
-            None
-        };
-
-        // Read file
-        let data = std::fs::read(file_path).map_err(|e| {
-            Error::ModuleError(
-                VtableError::FileRead {
-                    path: file_path.to_string(),
-                    source: e,
-                }
-                .to_string(),
-            )
+    ) -> rusqlite::Result<(Cow<'static, CStr>, Self)> {
+        let state = aux.ok_or_else(|| {
+            Error::ModuleError("egg module was registered without its state".into())
         })?;
+        let args = parse_args(args).map_err(|e| Error::ModuleError(e.to_string()))?;
+        let shared = state.open(Path::new(&args.path), args.passphrase.as_ref())?;
 
-        // Parse header
-        let header = Header::from_bytes(&data)
-            .map_err(|e| Error::ModuleError(VtableError::Format(e).to_string()))?;
-
-        // Derive encryption key if passphrase provided and file is encrypted
-        let encryption_key = if let Some(pp) = passphrase {
-            if !header.flags.has_encryption() {
-                return Err(Error::ModuleError(
-                    "passphrase provided but file is not encrypted".into(),
-                ));
-            }
-            let yolk_start = header.yolk_offset as usize;
-            let salt_end = yolk_start + eggdb_core::SALT_SIZE;
-            if salt_end > data.len() {
-                return Err(Error::ModuleError(format!(
-                    "yolk section too short for encryption salt: need {salt_end} bytes, file is {}",
-                    data.len()
-                )));
-            }
-            let mut salt = [0u8; eggdb_core::SALT_SIZE];
-            salt.copy_from_slice(&data[yolk_start..salt_end]);
-            let key = eggdb_core::derive_key(pp, &salt)
-                .map_err(|e| Error::ModuleError(format!("key derivation failed: {e}")))?;
-            Some(key)
-        } else {
-            if header.flags.has_encryption() {
-                return Err(Error::ModuleError(
-                    "file is encrypted but no passphrase provided".into(),
-                ));
-            }
-            None
-        };
-
-        // Parse albumen
-        let albumen_start = header.albumen_offset as usize;
-        let albumen_end = header.yolk_offset as usize;
-        if albumen_end > data.len() || albumen_start > albumen_end {
-            return Err(Error::ModuleError(format!(
-                "invalid albumen range [{albumen_start}..{albumen_end}] in file of size {}",
-                data.len()
-            )));
+        let guard = lock(&shared)?;
+        let snapshot = guard.snapshot();
+        if snapshot.header().flags.has_encryption() && args.passphrase.is_none() {
+            return Err(Error::ModuleError(
+                "file is encrypted but no passphrase provided".into(),
+            ));
         }
-        let tables =
-            eggdb_core::format::albumen::deserialize_albumen(&data[albumen_start..albumen_end])
-                .map_err(|e| Error::ModuleError(VtableError::Format(e).to_string()))?;
-
-        // Find requested table
-        let table_idx = tables
-            .iter()
-            .position(|t| t.table_name == table_name)
-            .ok_or_else(|| {
-                Error::ModuleError(VtableError::TableNotFound(table_name.to_string()).to_string())
-            })?;
-
-        let table_meta = &tables[table_idx];
-        let schema_sql = build_schema_sql(table_meta);
-
-        let file_data = Arc::new(EggFileData {
-            data,
-            header,
-            tables,
-            encryption_key,
-        });
+        let table_idx = snapshot.table_index(&args.table).ok_or_else(|| {
+            Error::ModuleError(VtableError::TableNotFound(args.table.clone()).to_string())
+        })?;
+        let schema = declared_schema(&snapshot.tables()[table_idx])?;
+        drop(guard);
 
         let vtab = EggTab {
             base: ffi::sqlite3_vtab::default(),
-            file_data,
+            shared,
             table_idx,
+            writable: args.writable,
         };
-
-        Ok((schema_sql, vtab))
+        Ok((Cow::Owned(schema), vtab))
     }
 
-    fn best_index(&self, info: &mut IndexInfo) -> rusqlite::Result<()> {
-        let table_meta = &self.file_data.tables[self.table_idx];
+    fn best_index(&self, info: &mut IndexInfo) -> rusqlite::Result<bool> {
+        let guard = lock(&self.shared)?;
+        let table_meta = &guard.snapshot().tables()[self.table_idx];
         let row_count = table_meta.row_count;
+        let live_rows = guard.overlay(self.table_idx).live_rows();
         let col_used = info.col_used();
 
-        let mut total_cost = row_count as f64;
+        let mut total_cost = live_rows as f64;
         let mut idx_str_parts: Vec<String> = Vec::new();
         let mut argv_idx = 1i32; // 1-based for SQLite
 
@@ -366,7 +273,8 @@ unsafe impl<'vtab> VTab<'vtab> for EggTab {
 
             // Tell SQLite to pass this constraint value to xFilter
             usage.set_argv_index(argv_idx);
-            // Don't omit — let SQLite double-check for safety
+            // Never omit: SQLite must re-check every row. Push-down masks may
+            // contain extra rows (logged changes), never miss matching ones.
             usage.set_omit(false);
             argv_idx += 1;
 
@@ -379,21 +287,21 @@ unsafe impl<'vtab> VTab<'vtab> for EggTab {
         info.set_idx_str(&idx_str);
         info.set_idx_num((argv_idx - 1) as c_int);
         info.set_estimated_cost(total_cost);
-        info.set_estimated_rows(row_count as i64);
+        info.set_estimated_rows(live_rows as i64);
 
-        Ok(())
+        // Every plan is usable: constraints are optional push-down hints.
+        Ok(true)
     }
 
     fn open(&'vtab mut self) -> rusqlite::Result<EggCursor<'vtab>> {
-        let table_meta = &self.file_data.tables[self.table_idx];
-        let num_cols = table_meta.columns.len();
-        let row_count = table_meta.row_count as usize;
-
+        let num_cols = lock(&self.shared)?.snapshot().tables()[self.table_idx]
+            .columns
+            .len();
         Ok(EggCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
             vtab: self,
             current_row: 0,
-            row_count,
+            row_count: 0,
             columns: vec![None; num_cols],
             row_mask: None,
             _phantom: PhantomData,
@@ -405,6 +313,78 @@ impl CreateVTab<'_> for EggTab {
     const KIND: VTabKind = VTabKind::Default;
 }
 
+impl EggTab {
+    /// Run a write against the shared state, refusing read-only tables.
+    fn write<T>(
+        &mut self,
+        op: impl FnOnce(&mut SharedEgg, usize) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        if !self.writable {
+            return Err(Error::ModuleError(
+                "egg table is read-only; create it with egg('<file>', '<table>', 'mode=rw') to allow writes"
+                    .into(),
+            ));
+        }
+        let mut guard = lock(&self.shared)?;
+        op(&mut guard, self.table_idx)
+    }
+}
+
+impl<'vtab> UpdateVTab<'vtab> for EggTab {
+    fn delete(&mut self, arg: ValueRef<'_>) -> rusqlite::Result<()> {
+        let rowid = rowid_arg(Some(arg))?;
+        self.write(|egg, t| egg.delete(t, rowid))
+    }
+
+    fn insert(&mut self, args: &Inserts<'_>) -> rusqlite::Result<i64> {
+        // args[0] is NULL (no old row); args[1] is the requested rowid.
+        let mut values = args.iter().skip(1);
+        if !matches!(values.next(), Some(ValueRef::Null)) {
+            return Err(Error::ModuleError(
+                "egg tables assign rowids themselves; INSERT with an explicit rowid is not supported"
+                    .into(),
+            ));
+        }
+        let row = values.map(from_value_ref).collect::<Result<Vec<_>, _>>()?;
+        self.write(|egg, t| egg.insert(t, row))
+    }
+
+    fn update(&mut self, args: &Updates<'_>) -> rusqlite::Result<()> {
+        let mut values = args.iter();
+        let old = rowid_arg(values.next())?;
+        let new = rowid_arg(values.next())?;
+        if old != new {
+            return Err(Error::ModuleError(
+                "changing the rowid of an egg table row is not supported".into(),
+            ));
+        }
+        let row = values.map(from_value_ref).collect::<Result<Vec<_>, _>>()?;
+        self.write(|egg, t| egg.update(t, old, row))
+    }
+}
+
+impl<'vtab> TransactionVTab<'vtab> for EggTab {
+    fn begin(&mut self) -> rusqlite::Result<()> {
+        // Read-only tables never take the write lock; their xUpdate fails.
+        if !self.writable {
+            return Ok(());
+        }
+        lock(&self.shared)?.begin()
+    }
+
+    fn sync(&mut self) -> rusqlite::Result<()> {
+        lock(&self.shared)?.sync()
+    }
+
+    fn commit(&mut self) -> rusqlite::Result<()> {
+        lock(&self.shared)?.commit()
+    }
+
+    fn rollback(&mut self) -> rusqlite::Result<()> {
+        lock(&self.shared)?.rollback()
+    }
+}
+
 /// The cursor for iterating over virtual table rows.
 #[repr(C)]
 pub struct EggCursor<'vtab> {
@@ -412,8 +392,10 @@ pub struct EggCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
     vtab: *mut EggTab,
     current_row: usize,
+    /// Physical rows: main-file rows plus logged inserts.
     row_count: usize,
     columns: Vec<Option<DecodedColumn>>,
+    /// Rows to visit; `None` = every row.
     row_mask: Option<BitVec>,
     _phantom: PhantomData<&'vtab EggTab>,
 }
@@ -438,172 +420,139 @@ impl<'vtab> EggCursor<'vtab> {
     }
 }
 
+/// Columns to decode: those SQLite reads plus those with constraints.
+fn needed_columns(num_cols: usize, col_used: u64, constraints: &[(usize, u8)]) -> Vec<usize> {
+    let mut need = vec![false; num_cols];
+    for (i, flag) in need.iter_mut().enumerate() {
+        // col_used only covers the first 64 columns; decode the rest.
+        *flag = i >= 64 || col_used & (1u64 << i) != 0;
+    }
+    for &(col_idx, _) in constraints {
+        if col_idx < num_cols {
+            need[col_idx] = true;
+        }
+    }
+    (0..num_cols).filter(|&i| need[i]).collect()
+}
+
+/// AND of every usable constraint's mask over main-file rows, computed on the
+/// encoded data. `None` when no constraint could be pushed down.
+fn constraint_mask(
+    snapshot: &EggSnapshot,
+    table_idx: usize,
+    constraints: &[(usize, u8)],
+    arg_values: &[Option<Value>],
+) -> rusqlite::Result<Option<BitVec>> {
+    let mut combined: Option<BitVec> = None;
+    // Every constraint consumes one argument, even if it is skipped.
+    for (&(col_idx, op_code), arg) in constraints.iter().zip(arg_values) {
+        let Some(part) = single_constraint_mask(snapshot, table_idx, col_idx, op_code, arg)? else {
+            continue;
+        };
+        combined = Some(match combined {
+            Some(mut existing) => {
+                existing &= part;
+                existing
+            }
+            None => part,
+        });
+    }
+    Ok(combined)
+}
+
+fn single_constraint_mask(
+    snapshot: &EggSnapshot,
+    table_idx: usize,
+    col_idx: usize,
+    op_code: u8,
+    arg: &Option<Value>,
+) -> rusqlite::Result<Option<BitVec>> {
+    let table_meta = &snapshot.tables()[table_idx];
+    let Some(col_meta) = table_meta.columns.get(col_idx) else {
+        return Ok(None);
+    };
+    let filter_op = code_to_filter_op(op_code);
+    let (null_bitmap, encoded_bytes) = read_column_block_from_parts_with_key(
+        snapshot.data(),
+        snapshot.header().yolk_offset,
+        col_meta,
+        table_meta.row_count,
+        snapshot.encryption_key(),
+    )
+    .map_err(|e| Error::ModuleError(format!("failed to read column block: {e}")))?;
+
+    match filter_op {
+        // Null bitmap set bits are nulls, so it is the IS NULL match mask.
+        FilterOp::IsNull => Ok(Some(null_bitmap)),
+        FilterOp::IsNotNull => Ok(Some(!null_bitmap)),
+        _ => {
+            // Push down only same-type comparisons: our Value ordering is
+            // type-based, not numeric. A text argument that is not valid
+            // UTF-8 (`None`) is never pushed down. SQLite re-checks every row.
+            let Some(filter_value) = arg else {
+                return Ok(None);
+            };
+            if filter_value.sqlite_type() != Some(col_meta.sqlite_type) {
+                return Ok(None);
+            }
+            let non_null_count = null_bitmap.iter().filter(|b| !**b).count();
+            let non_null_matches = encoder_for(col_meta.encoding)
+                .filter_indices(&encoded_bytes, non_null_count, &filter_op, filter_value)
+                .map_err(|e| Error::ModuleError(format!("filter_indices failed: {e}")))?;
+            Ok(Some(expand_non_null_indices(
+                &non_null_matches,
+                &null_bitmap,
+            )))
+        }
+    }
+}
+
 // Safety: EggCursor has #[repr(C)] with sqlite3_vtab_cursor as the first field.
 unsafe impl VTabCursor for EggCursor<'_> {
     fn filter(
         &mut self,
         _idx_num: c_int,
         idx_str: Option<&str>,
-        args: &Values<'_>,
+        args: &Filters<'_>,
     ) -> rusqlite::Result<()> {
-        // Clone Arc to avoid borrowing self through vtab() — allows later mutation of self
-        let (file_data, table_idx) = {
+        // Clone the Arc so self can be mutated while the state is locked.
+        let (shared, table_idx) = {
             let vtab = self.vtab();
-            (Arc::clone(&vtab.file_data), vtab.table_idx)
+            (Arc::clone(&vtab.shared), vtab.table_idx)
         };
-        let table_meta = &file_data.tables[table_idx];
+        let guard = lock(&shared)?;
+        guard.check_usable()?;
+        let snapshot = guard.snapshot();
+        let num_cols = snapshot.tables()[table_idx].columns.len();
 
-        // Parse the query plan
-        let (col_used, constraints) = match idx_str {
-            Some(s) => parse_idx_str(s),
-            None => (u64::MAX, Vec::new()),
-        };
+        let (col_used, constraints) = idx_str.map_or((u64::MAX, Vec::new()), parse_idx_str);
+        let arg_values: Vec<Option<Value>> =
+            args.iter().map(|vr| from_value_ref(vr).ok()).collect();
+        let base_mask = constraint_mask(snapshot, table_idx, &constraints, &arg_values)?;
 
-        // Determine which columns to decode
-        let num_cols = table_meta.columns.len();
-        let mut need_decode = vec![false; num_cols];
+        let needed = needed_columns(num_cols, col_used, &constraints);
+        let decoded = snapshot
+            .decode_base_columns(table_idx, &needed)
+            .map_err(store_err)?;
 
-        // Columns requested by SQLite
-        for (i, flag) in need_decode.iter_mut().enumerate() {
-            if i < 64 {
-                if col_used & (1u64 << i) != 0 {
-                    *flag = true;
-                }
-            } else {
-                // col_used only covers first 64 columns; decode the rest
-                *flag = true;
+        // Snapshot the rows this scan sees, so later writes cannot disturb it.
+        let overlay = guard.overlay(table_idx);
+        self.columns = vec![None; num_cols];
+        if overlay.is_empty() {
+            self.row_mask = base_mask;
+            self.row_count = snapshot.tables()[table_idx].row_count as usize;
+            for (i, values) in needed.into_iter().zip(decoded) {
+                self.columns[i] = Some(values);
             }
-        }
-
-        // Columns needed for filter constraints
-        for &(col_idx, _) in &constraints {
-            if col_idx < num_cols {
-                need_decode[col_idx] = true;
-            }
-        }
-
-        // Collect filter argument values up front
-        let arg_values: Vec<Value> = args.iter().map(|vr| value_ref_to_value(vr)).collect();
-
-        // Apply filter constraints to build row_mask
-        let mut combined_mask: Option<BitVec> = None;
-        let mut arg_idx = 0usize;
-
-        for &(col_idx, op_code) in &constraints {
-            if col_idx >= num_cols {
-                arg_idx += 1;
-                continue;
-            }
-
-            let col_meta = &table_meta.columns[col_idx];
-            let filter_op = code_to_filter_op(op_code);
-
-            // Every constraint consumes one arg (IS NULL/IS NOT NULL get a NULL value)
-            let filter_value = arg_values.get(arg_idx).cloned().unwrap_or(Value::Null);
-            arg_idx += 1;
-
-            // Read the column block for filtering
-            let (null_bitmap, encoded_bytes) = read_column_block_from_parts_with_key(
-                &file_data.data,
-                file_data.header.yolk_offset,
-                col_meta,
-                table_meta.row_count,
-                file_data.encryption_key.as_deref(),
-            )
-            .map_err(|e| Error::ModuleError(format!("failed to read column block: {e}")))?;
-
-            let row_mask_part = match filter_op {
-                FilterOp::IsNull => {
-                    // Return null bitmap directly (1=null=match)
-                    null_bitmap.clone()
-                }
-                FilterOp::IsNotNull => {
-                    // Invert null bitmap (0=present=match)
-                    let mut result = null_bitmap.clone();
-                    for mut bit in result.iter_mut() {
-                        *bit = !*bit;
-                    }
-                    result
-                }
-                _ => {
-                    // Skip push-down for cross-type comparisons (e.g., Integer col vs Real value)
-                    // because our Value ordering is type-based, not numeric.
-                    // SQLite will still apply its own filter (omit=false).
-                    let col_type = col_meta.sqlite_type;
-                    let val_type = filter_value.sqlite_type();
-                    let type_compatible = match (col_type, val_type) {
-                        // Same type — always compatible
-                        _ if val_type == Some(col_type) => true,
-                        // Integer/Real are numeric-compatible in SQL
-                        (SqliteType::Integer, Some(SqliteType::Real))
-                        | (SqliteType::Real, Some(SqliteType::Integer)) => false,
-                        // NULL filter value — skip push-down (shouldn't happen, handled above)
-                        (_, None) => false,
-                        // Different non-numeric types — skip
-                        _ => false,
-                    };
-
-                    if !type_compatible {
-                        continue;
-                    }
-
-                    // Run filter on non-null values, then expand to full row space
-                    let non_null_count = null_bitmap.iter().filter(|b| !**b).count();
-                    let encoder = encoder_for(col_meta.encoding);
-                    let non_null_matches = encoder
-                        .filter_indices(&encoded_bytes, non_null_count, &filter_op, &filter_value)
-                        .map_err(|e| Error::ModuleError(format!("filter_indices failed: {e}")))?;
-                    expand_non_null_indices(&non_null_matches, &null_bitmap)
-                }
-            };
-
-            combined_mask = Some(match combined_mask {
-                Some(existing) => {
-                    // AND the masks together
-                    let mut result = existing;
-                    result &= row_mask_part;
-                    result
-                }
-                None => row_mask_part,
+        } else {
+            self.row_mask = Some(match base_mask {
+                Some(mask) => overlay.widen_base_mask(mask).map_err(format_err)?,
+                None => overlay.live_mask(),
             });
-        }
-
-        self.row_mask = combined_mask;
-
-        // Decode needed columns in parallel
-        use rayon::prelude::*;
-
-        // Initialize all slots to None
-        for col_slot in self.columns.iter_mut() {
-            *col_slot = None;
-        }
-
-        // Collect indices that need decoding
-        let needed_indices: Vec<usize> = need_decode
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &needed)| if needed { Some(i) } else { None })
-            .collect();
-
-        // Decode needed columns in parallel
-        let decoded_results: Result<Vec<(usize, Vec<Value>)>, Error> = needed_indices
-            .par_iter()
-            .map(|&i| {
-                let col_meta = &table_meta.columns[i];
-                decode_column_from_parts_with_key(
-                    &file_data.data,
-                    file_data.header.yolk_offset,
-                    col_meta,
-                    table_meta.row_count,
-                    file_data.encryption_key.as_deref(),
-                )
-                .map(|decoded| (i, decoded))
-                .map_err(|e| Error::ModuleError(format!("failed to decode column {i}: {e}")))
-            })
-            .collect();
-
-        for (i, decoded) in decoded_results? {
-            self.columns[i] = Some(decoded);
+            self.row_count = overlay.physical_rows() as usize;
+            for (i, values) in needed.into_iter().zip(decoded) {
+                self.columns[i] = Some(overlay.physical_column(i, values).map_err(format_err)?);
+            }
         }
 
         // Start at first matching row
@@ -650,14 +599,14 @@ unsafe impl VTabCursor for EggCursor<'_> {
     }
 }
 
-/// Return the module descriptor for the egg virtual table.
-pub fn egg_module() -> &'static Module<'static, EggTab> {
-    read_only_module::<EggTab>()
-}
-
 /// Register the egg virtual table module on a connection.
+///
+/// Each call creates fresh per-connection state, so egg tables on different
+/// connections never share transactions.
 pub fn register_egg_module(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.create_module("egg", egg_module(), None)
+    // A reference to a `const` is promoted to `'static`, which `create_module` requires.
+    const MODULE: Module<'static, EggTab> = Module::update_module_with_tx();
+    conn.create_module(c"egg", &MODULE, Some(ModuleState::default()))
 }
 
 #[cfg(test)]

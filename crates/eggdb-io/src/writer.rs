@@ -192,6 +192,8 @@ pub fn lay(conn: &Connection, options: &LayOptions) -> Result<Vec<u8>, IoError> 
 ///
 /// Opens the SQLite database, calls [`lay`], and writes the result to the output path.
 pub fn lay_file(source: &Path, output: &Path, options: &LayOptions) -> Result<LayResult, IoError> {
+    // Overwriting an egg that has pending changes would orphan its write log.
+    eggdb_store::ensure_no_pending_log(output)?;
     let original_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
 
     let conn = Connection::open(source)?;
@@ -235,6 +237,7 @@ pub fn incremental_lay_file(
     output: &Path,
     options: &LayOptions,
 ) -> Result<LayResult, IoError> {
+    eggdb_store::ensure_no_pending_log(output)?;
     let original_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
     let existing_egg_data = std::fs::read(existing_egg)?;
 

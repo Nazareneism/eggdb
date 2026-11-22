@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 eggdb-core = { path = "crates/eggdb-core" }
 eggdb-io = { path = "crates/eggdb-io" }
+eggdb-store = { path = "crates/eggdb-store" }
 eggdb-yql = { path = "crates/eggdb-yql" }
 eggdb-vtable = { path = "crates/eggdb-vtable" }
 bitvec = { workspace = true }
@@ -36,7 +37,7 @@ serde = { workspace = true }
 tempfile = "3"
 
 [workspace]
-members = ["crates/eggdb-core", "crates/eggdb-io", "crates/eggdb-vtable", "crates/eggdb-yql"]
+members = ["crates/eggdb-core", "crates/eggdb-io", "crates/eggdb-store", "crates/eggdb-vtable", "crates/eggdb-yql"]
 exclude = ["fuzz", "python"]
 resolver = "2"
 
@@ -48,7 +49,7 @@ zstd = "0.13"
 crc32c = "0.6"
 blake3 = "1"
 thiserror = "2"
-rusqlite = { version = "0.31", features = ["bundled", "blob", "vtab"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "blob", "vtab"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 clap = { version = "4", features = ["derive"] }

@@ -1,9 +1,11 @@
 pub mod candle;
+pub mod compact;
 pub mod crack;
 pub mod diff;
 pub mod hatch;
 pub mod info;
 pub mod lay;
+pub mod pending;
 pub mod query;
 pub mod relay;
 pub mod schema;

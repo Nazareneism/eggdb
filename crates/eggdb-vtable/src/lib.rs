@@ -1,5 +1,8 @@
+pub mod args;
 pub mod column_cache;
+pub mod constraints;
 pub mod error;
+pub mod shared;
 pub mod vtab;
 
 pub use vtab::{register_egg_module, EggTab};
@@ -8,7 +11,7 @@ pub use vtab::{register_egg_module, EggTab};
 mod extension {
     use std::os::raw::{c_char, c_int};
 
-    use rusqlite::ffi;
+    use rusqlite::{ffi, Connection};
 
     use crate::register_egg_module;
 
@@ -28,23 +31,16 @@ mod extension {
         pz_err_msg: *mut *mut c_char,
         p_api: *mut ffi::sqlite3_api_routines,
     ) -> c_int {
-        if p_api.is_null() {
-            return ffi::SQLITE_ERROR;
-        }
-
-        match extension_init(db, p_api) {
-            Ok(()) => ffi::SQLITE_OK,
-            Err(e) => unsafe { rusqlite::to_sqlite_error(&e, pz_err_msg) },
-        }
+        // Safety (FFI): all three pointers come straight from SQLite's
+        // extension loader. rusqlite rejects a null `p_api`, wraps `db`
+        // without taking ownership, and reports errors via `pz_err_msg`.
+        unsafe { Connection::extension_init2(db, pz_err_msg, p_api, extension_init) }
     }
 
-    fn extension_init(
-        db: *mut ffi::sqlite3,
-        p_api: *mut ffi::sqlite3_api_routines,
-    ) -> rusqlite::Result<()> {
-        // Safety: p_api is checked for null above, db is provided by SQLite.
-        let conn = unsafe { rusqlite::Connection::extension_init2(db, p_api)? };
+    /// Register the module. `Ok(false)`: not a persistent extension, so it is
+    /// released together with the connection that loaded it.
+    fn extension_init(conn: Connection) -> rusqlite::Result<bool> {
         register_egg_module(&conn)?;
-        Ok(())
+        Ok(false)
     }
 }

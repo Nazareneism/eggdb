@@ -4,6 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use eggdb_core::Value;
+use eggdb_store::EggSnapshot;
+
+use crate::commands::pending::open_snapshot;
 
 pub fn run(
     egg: &Path,
@@ -18,30 +21,17 @@ pub fn run(
         format
     );
 
-    let data = std::fs::read(egg).with_context(|| format!("failed to read {}", egg.display()))?;
-
-    let reader = if let Some(pass) = passphrase {
-        eggdb_core::EggReader::open_with_passphrase(&data, pass)
-            .with_context(|| format!("failed to parse encrypted {}", egg.display()))?
-    } else {
-        eggdb_core::EggReader::open(&data)
-            .with_context(|| format!("failed to parse {}", egg.display()))?
-    };
-
-    let tables = reader.tables();
+    let snapshot = open_snapshot(egg, passphrase)?;
 
     match format {
-        "csv" => crack_csv(&reader, tables, table_name),
-        "json" => crack_json(&reader, tables, table_name),
+        "csv" => crack_csv(&snapshot, table_name),
+        "json" => crack_json(&snapshot, table_name),
         _ => unreachable!(),
     }
 }
 
-fn crack_csv(
-    reader: &eggdb_core::EggReader<'_>,
-    tables: &[eggdb_core::TableMeta],
-    table_filter: Option<&str>,
-) -> Result<()> {
+fn crack_csv(snapshot: &EggSnapshot, table_filter: Option<&str>) -> Result<()> {
+    let tables = snapshot.tables();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -52,7 +42,7 @@ fn crack_csv(
             }
         }
 
-        let row_count = table.row_count as usize;
+        let row_count = snapshot.live_row_count(table_idx) as usize;
         let num_cols = table.columns.len();
 
         // Header row
@@ -64,8 +54,8 @@ fn crack_csv(
         }
 
         // Decode all columns in parallel
-        let columns = reader
-            .decode_all_columns_parallel(table_idx)
+        let columns = snapshot
+            .visible_table(table_idx)
             .with_context(|| format!("failed to decode table '{}'", table.table_name))?;
 
         // Transpose and write rows
@@ -94,11 +84,8 @@ fn crack_csv(
     Ok(())
 }
 
-fn crack_json(
-    reader: &eggdb_core::EggReader<'_>,
-    tables: &[eggdb_core::TableMeta],
-    table_filter: Option<&str>,
-) -> Result<()> {
+fn crack_json(snapshot: &EggSnapshot, table_filter: Option<&str>) -> Result<()> {
+    let tables = snapshot.tables();
     let mut all_tables = serde_json::Map::new();
 
     for (table_idx, table) in tables.iter().enumerate() {
@@ -108,15 +95,15 @@ fn crack_json(
             }
         }
 
-        let row_count = table.row_count as usize;
+        let row_count = snapshot.live_row_count(table_idx) as usize;
         let num_cols = table.columns.len();
 
         let mut rows_json = Vec::with_capacity(row_count);
 
         if row_count > 0 && num_cols > 0 {
             // Decode all columns in parallel
-            let columns = reader
-                .decode_all_columns_parallel(table_idx)
+            let columns = snapshot
+                .visible_table(table_idx)
                 .with_context(|| format!("failed to decode table '{}'", table.table_name))?;
 
             // Transpose to rows

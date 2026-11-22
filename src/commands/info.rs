@@ -1,39 +1,34 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use comfy_table::{Cell, ContentArrangement, Table};
 
+use eggdb_store::EggSnapshot;
+
+use crate::commands::pending::{describe, open_snapshot, print_pending};
 use crate::format::{format_ratio, format_size, truncate_display};
 
 pub fn run(egg: &Path, table_name: Option<&str>) -> Result<()> {
-    anyhow::ensure!(egg.exists(), "egg file not found: {}", egg.display());
-
-    let data = std::fs::read(egg).with_context(|| format!("failed to read {}", egg.display()))?;
-
-    let reader = eggdb_core::EggReader::open(&data)
-        .with_context(|| format!("failed to parse {}", egg.display()))?;
-
-    let tables = reader.tables();
+    let snapshot = open_snapshot(egg, None)?;
 
     match table_name {
         Some(name) => {
-            let table = tables
-                .iter()
-                .find(|t| t.table_name == name)
+            let t = snapshot
+                .table_index(name)
                 .ok_or_else(|| anyhow::anyhow!("table '{}' not found", name))?;
-
-            print_table_detail(table);
+            print_table_detail(&snapshot, t);
         }
         None => {
-            print_overview(tables);
+            print_overview(&snapshot);
         }
     }
+    print_pending(&snapshot);
 
     Ok(())
 }
 
-fn print_overview(tables: &[eggdb_core::TableMeta]) {
+fn print_overview(snapshot: &EggSnapshot) {
     println!("{}", "Table Overview".bold().underline());
     println!();
 
@@ -46,32 +41,43 @@ fn print_overview(tables: &[eggdb_core::TableMeta]) {
         Cell::new("Compressed"),
         Cell::new("Uncompressed"),
         Cell::new("Ratio"),
+        Cell::new("Pending changes"),
     ]);
 
-    for table in tables {
+    for (t, table) in snapshot.tables().iter().enumerate() {
         let compressed: u64 = table.columns.iter().map(|c| c.yolk_length).sum();
         let uncompressed: u64 = table.columns.iter().map(|c| c.uncompressed_size).sum();
+        let pending = describe(&snapshot.overlays()[t].pending_counts());
 
         tbl.add_row(vec![
             Cell::new(&table.table_name),
-            Cell::new(table.row_count),
+            Cell::new(snapshot.live_row_count(t)),
             Cell::new(table.columns.len()),
             Cell::new(format_size(compressed)),
             Cell::new(format_size(uncompressed)),
             Cell::new(format_ratio(uncompressed, compressed)),
+            Cell::new(pending.unwrap_or_else(|| "-".into())),
         ]);
     }
 
     println!("{tbl}");
 }
 
-fn print_table_detail(table: &eggdb_core::TableMeta) {
+fn print_table_detail(snapshot: &EggSnapshot, t: usize) {
+    let table = &snapshot.tables()[t];
     println!(
         "{} {} ({} rows)",
         "Table:".bold(),
         table.table_name.bold(),
-        table.row_count
+        snapshot.live_row_count(t)
     );
+    if !snapshot.overlays()[t].is_empty() {
+        println!(
+            "{}",
+            "Column statistics below describe the main file; pending changes are not included."
+                .dimmed()
+        );
+    }
     println!();
 
     let mut tbl = Table::new();

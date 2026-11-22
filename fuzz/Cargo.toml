@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+crc32c = "0.6"
 
 [dependencies.eggdb-core]
 path = "../crates/eggdb-core"
@@ -19,6 +20,13 @@ path = "../crates/eggdb-yql"
 [[bin]]
 name = "fuzz_egg_reader"
 path = "fuzz_targets/fuzz_egg_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wal_reader"
+path = "fuzz_targets/fuzz_wal_reader.rs"
 test = false
 doc = false
 bench = false

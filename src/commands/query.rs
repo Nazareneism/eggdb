@@ -5,6 +5,8 @@ use colored::Colorize;
 use comfy_table::{Cell, Table};
 use rusqlite::types::ValueRef;
 
+use crate::commands::pending::open_snapshot;
+
 /// Run a query (YQL or SQL) against an .egg file.
 pub fn run(egg: &Path, query: &str, passphrase: Option<&str>) -> Result<()> {
     anyhow::ensure!(egg.exists(), "egg file not found: {}", egg.display());
@@ -29,17 +31,15 @@ pub(crate) fn detect_and_transpile(input: &str) -> Result<String> {
     }
 }
 
-/// Open an .egg file and set up an in-memory SQLite connection with virtual tables.
+/// Open an .egg file and set up an in-memory SQLite connection with writable
+/// virtual tables (one per egg table, same names).
 pub(crate) fn setup_egg_connection(
     egg: &Path,
     passphrase: Option<&str>,
 ) -> Result<(rusqlite::Connection, Vec<eggdb_core::TableMeta>)> {
-    let data = std::fs::read(egg).with_context(|| format!("failed to read {}", egg.display()))?;
-
-    let reader = eggdb_core::EggReader::open(&data)
-        .with_context(|| format!("failed to parse {}", egg.display()))?;
-
-    let tables: Vec<eggdb_core::TableMeta> = reader.tables().to_vec();
+    // Table names need no decryption key; opening the snapshot here also
+    // reports a broken or mismatched write log before any table is created.
+    let tables = open_snapshot(egg, None)?.tables().to_vec();
 
     let conn = rusqlite::Connection::open_in_memory()
         .context("failed to open in-memory SQLite connection")?;
@@ -53,21 +53,19 @@ pub(crate) fn setup_egg_connection(
         .with_context(|| format!("failed to resolve path: {}", egg.display()))?;
 
     for table in &tables {
-        let escaped_name = table.table_name.replace('"', "\"\"");
-        let escaped_name_sql = table.table_name.replace('\'', "''");
-        let escaped_path = abs_path.display().to_string().replace('\'', "''");
-        let sql = if let Some(pass) = passphrase {
-            let escaped_pass = pass.replace('\'', "''");
-            format!(
-                "CREATE VIRTUAL TABLE \"{}\" USING egg('{}', '{}', '{}')",
-                escaped_name, escaped_path, escaped_name_sql, escaped_pass
-            )
-        } else {
-            format!(
-                "CREATE VIRTUAL TABLE \"{}\" USING egg('{}', '{}')",
-                escaped_name, escaped_path, escaped_name_sql
-            )
-        };
+        let mut args = vec![
+            sql_string(&abs_path.display().to_string()),
+            sql_string(&table.table_name),
+            sql_string("mode=rw"),
+        ];
+        if let Some(pass) = passphrase {
+            args.push(sql_string(&format!("passphrase={pass}")));
+        }
+        let sql = format!(
+            "CREATE VIRTUAL TABLE \"{}\" USING egg({})",
+            table.table_name.replace('"', "\"\""),
+            args.join(", ")
+        );
         conn.execute_batch(&sql).with_context(|| {
             format!("failed to create virtual table for '{}'", table.table_name)
         })?;
@@ -76,11 +74,30 @@ pub(crate) fn setup_egg_connection(
     Ok((conn, tables))
 }
 
-/// Execute a SQL query and print results as a formatted table.
+/// A single-quoted SQL string literal.
+fn sql_string(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Execute a SQL statement. Queries print a table; statements that return
+/// no columns (INSERT, UPDATE, DELETE, ...) print how many rows changed.
 pub(crate) fn execute_and_print(conn: &rusqlite::Connection, sql: &str) -> Result<()> {
     let mut stmt = conn
         .prepare(sql)
         .with_context(|| format!("failed to prepare SQL: {sql}"))?;
+
+    if stmt.column_count() == 0 {
+        let changed = stmt.execute([]).context("statement failed")?;
+        println!(
+            "{}",
+            format!(
+                "{changed} row{} changed (saved; run `egg compact` later to fold changes into the main file)",
+                if changed == 1 { "" } else { "s" }
+            )
+            .dimmed()
+        );
+        return Ok(());
+    }
 
     let col_count = stmt.column_count();
     let col_names: Vec<String> = (0..col_count)

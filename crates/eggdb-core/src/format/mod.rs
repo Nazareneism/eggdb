@@ -2,8 +2,11 @@ pub mod albumen;
 pub mod crypto;
 pub mod header;
 pub mod membrane;
+pub mod overlay;
 pub mod reader;
+pub mod rebuild;
 pub mod validate;
+pub mod wal;
 pub mod writer;
 
 use thiserror::Error;
@@ -73,6 +76,11 @@ pub enum FormatError {
         encoding: &'static str,
         detail: String,
     },
+
+    /// The write log (`.egg.wal`) is malformed, or an operation in it is
+    /// inconsistent with the table it targets.
+    #[error("write log error: {0}")]
+    WriteLog(String),
 }
 
 /// Returns the bincode configuration for format version 1.

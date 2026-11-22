@@ -1,21 +1,16 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 
+use crate::commands::pending::{describe, open_snapshot, print_pending};
 use crate::format::{format_ratio, format_size, format_timestamp};
 
 pub fn run(egg: &Path) -> Result<()> {
-    anyhow::ensure!(egg.exists(), "egg file not found: {}", egg.display());
-
-    let data = std::fs::read(egg).with_context(|| format!("failed to read {}", egg.display()))?;
-
-    let reader = eggdb_core::EggReader::open(&data)
-        .with_context(|| format!("failed to parse {}", egg.display()))?;
-
-    let header = reader.header();
-    let tables = reader.tables();
-    let egg_size = data.len() as u64;
+    let snapshot = open_snapshot(egg, None)?;
+    let header = snapshot.header();
+    let tables = snapshot.tables();
+    let egg_size = snapshot.data().len() as u64;
 
     println!("{}", "Egg Summary".bold().underline());
     println!();
@@ -61,16 +56,21 @@ pub fn run(egg: &Path) -> Result<()> {
         println!();
         println!("{}", "Tables".bold().underline());
         println!();
-        for table in tables {
+        for (t, table) in tables.iter().enumerate() {
+            let pending = describe(&snapshot.overlays()[t].pending_counts())
+                .map(|d| format!(", pending: {d}").yellow().to_string())
+                .unwrap_or_default();
             println!(
-                "  {} {} ({} rows, {} columns)",
+                "  {} {} ({} rows, {} columns{})",
                 "•".green(),
                 table.table_name.bold(),
-                table.row_count,
-                table.columns.len()
+                snapshot.live_row_count(t),
+                table.columns.len(),
+                pending
             );
         }
     }
+    print_pending(&snapshot);
 
     Ok(())
 }

@@ -1,24 +1,36 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 
+use eggdb_store::EggSnapshot;
+
+use crate::commands::pending::open_snapshot;
 use crate::format::{format_ratio, format_size};
+
+/// Live row count (main file plus pending changes) per table name.
+fn live_rows_by_name(snapshot: &EggSnapshot) -> HashMap<&str, u64> {
+    snapshot
+        .tables()
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.table_name.as_str(), snapshot.live_row_count(i)))
+        .collect()
+}
 
 pub fn run(a_path: &Path, b_path: &Path) -> Result<()> {
     anyhow::ensure!(a_path.exists(), "egg file not found: {}", a_path.display());
     anyhow::ensure!(b_path.exists(), "egg file not found: {}", b_path.display());
 
-    let a_data =
-        std::fs::read(a_path).with_context(|| format!("failed to read {}", a_path.display()))?;
-    let b_data =
-        std::fs::read(b_path).with_context(|| format!("failed to read {}", b_path.display()))?;
-
-    let a_reader = eggdb_core::EggReader::open(&a_data)
-        .with_context(|| format!("failed to parse {}", a_path.display()))?;
-    let b_reader = eggdb_core::EggReader::open(&b_data)
-        .with_context(|| format!("failed to parse {}", b_path.display()))?;
+    // Row counts include pending write-log changes; encodings and sizes
+    // describe each main file.
+    let a_reader = open_snapshot(a_path, None)?;
+    let b_reader = open_snapshot(b_path, None)?;
+    let a_data = a_reader.data();
+    let b_data = b_reader.data();
+    let a_rows = live_rows_by_name(&a_reader);
+    let b_rows = live_rows_by_name(&b_reader);
 
     let mut differences = 0u64;
 
@@ -122,7 +134,7 @@ pub fn run(a_path: &Path, b_path: &Path) -> Result<()> {
             "  {} {} (only in A, {} rows, {} columns)",
             "-".red(),
             name.bold(),
-            t.row_count,
+            a_rows[name],
             t.columns.len()
         );
     }
@@ -134,7 +146,7 @@ pub fn run(a_path: &Path, b_path: &Path) -> Result<()> {
             "  {} {} (only in B, {} rows, {} columns)",
             "+".green(),
             name.bold(),
-            t.row_count,
+            b_rows[name],
             t.columns.len()
         );
     }
@@ -147,13 +159,13 @@ pub fn run(a_path: &Path, b_path: &Path) -> Result<()> {
         let mut table_lines: Vec<String> = Vec::new();
 
         // Row count
-        if at.row_count != bt.row_count {
+        if a_rows[name] != b_rows[name] {
             table_diffs += 1;
             table_lines.push(format!(
                 "    {} row count: {} → {}",
                 "~".yellow(),
-                at.row_count,
-                bt.row_count
+                a_rows[name],
+                b_rows[name]
             ));
         }
 

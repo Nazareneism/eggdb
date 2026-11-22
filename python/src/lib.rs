@@ -17,7 +17,8 @@ enum RustValue {
 #[pyclass]
 struct EggFile {
     path: PathBuf,
-    data: Vec<u8>,
+    /// Main file plus pending write-log changes, read when opened.
+    snapshot: eggdb_store::EggSnapshot,
     passphrase: Option<Zeroizing<String>>,
 }
 
@@ -34,20 +35,12 @@ impl EggFile {
             )));
         }
 
-        let data =
-            std::fs::read(&path).map_err(|e| PyIOError::new_err(format!("read error: {e}")))?;
-
-        // Validate the file is a valid egg
-        let reader = if let Some(pass) = passphrase {
-            eggdb_core::EggReader::open_with_passphrase(&data, pass)
-        } else {
-            eggdb_core::EggReader::open(&data)
-        };
-        reader.map_err(|e| PyValueError::new_err(format!("invalid egg file: {e}")))?;
+        let snapshot = eggdb_store::EggSnapshot::open(&path, passphrase)
+            .map_err(|e| PyValueError::new_err(format!("invalid egg file: {e}")))?;
 
         Ok(Self {
             path,
-            data,
+            snapshot,
             passphrase: passphrase.map(|s| Zeroizing::new(String::from(s))),
         })
     }
@@ -55,8 +48,8 @@ impl EggFile {
     /// List of table names in the egg file.
     #[getter]
     fn tables(&self) -> PyResult<Vec<String>> {
-        let reader = self.open_reader()?;
-        Ok(reader
+        Ok(self
+            .snapshot
             .tables()
             .iter()
             .map(|t| t.table_name.clone())
@@ -65,10 +58,12 @@ impl EggFile {
 
     /// File summary: size, compression ratio, table count, etc.
     fn summary(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let reader = self.open_reader()?;
-        let header = reader.header();
-        let file_size = self.data.len() as u64;
-        let total_rows: u64 = reader.tables().iter().map(|t| t.row_count).sum();
+        let header = self.snapshot.header();
+        let file_size = self.snapshot.data().len() as u64;
+        // Row counts include pending (not yet compacted) changes.
+        let total_rows: u64 = (0..self.snapshot.tables().len())
+            .map(|t| self.snapshot.live_row_count(t))
+            .sum();
 
         let dict = PyDict::new(py);
         dict.set_item("file_size", file_size)?;
@@ -87,9 +82,8 @@ impl EggFile {
 
     /// Per-column detail for a table.
     fn columns(&self, py: Python<'_>, table: &str) -> PyResult<PyObject> {
-        let reader = self.open_reader()?;
-
-        let table_meta = reader
+        let table_meta = self
+            .snapshot
             .tables()
             .iter()
             .find(|t| t.table_name == table)
@@ -120,20 +114,14 @@ impl EggFile {
             query.to_string()
         };
 
-        let data = &self.data;
+        let table_names: Vec<String> =
+            self.snapshot.tables().iter().map(|t| t.table_name.clone()).collect();
         let path = &self.path;
         let passphrase = &self.passphrase;
 
         // Do all SQLite work without holding the GIL
         let (col_names, rows) = py
             .allow_threads(|| -> Result<(Vec<String>, Vec<Vec<RustValue>>), String> {
-                let reader = if let Some(ref pass) = passphrase {
-                    eggdb_core::EggReader::open_with_passphrase(data, pass)
-                } else {
-                    eggdb_core::EggReader::open(data)
-                };
-                let reader = reader.map_err(|e| format!("egg parse error: {e}"))?;
-
                 let conn = rusqlite::Connection::open_in_memory()
                     .map_err(|e| format!("sqlite error: {e}"))?;
 
@@ -144,9 +132,9 @@ impl EggFile {
                     .to_str()
                     .ok_or_else(|| "path is not valid UTF-8".to_string())?;
 
-                for table in reader.tables() {
-                    let escaped_ident = table.table_name.replace('"', "\"\"");
-                    let escaped_name = table.table_name.replace('\'', "''");
+                for table_name in &table_names {
+                    let escaped_ident = table_name.replace('"', "\"\"");
+                    let escaped_name = table_name.replace('\'', "''");
                     let escaped_path = path_str.replace('\'', "''");
                     let create_sql = if let Some(ref pass) = passphrase {
                         format!(
@@ -225,30 +213,16 @@ impl EggFile {
             .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("?");
-        match self.open_reader() {
-            Ok(reader) => {
-                let table_count = reader.table_count();
-                let encrypted = reader.header().flags.has_encryption();
-                format!(
-                    "EggFile('{}', tables={}, encrypted={})",
-                    filename,
-                    table_count,
-                    if encrypted { "True" } else { "False" },
-                )
-            }
-            Err(_) => format!("EggFile('{filename}', invalid=True)"),
-        }
-    }
-}
-
-impl EggFile {
-    fn open_reader(&self) -> PyResult<eggdb_core::EggReader<'_>> {
-        let reader = if let Some(ref pass) = self.passphrase {
-            eggdb_core::EggReader::open_with_passphrase(&self.data, pass)
-        } else {
-            eggdb_core::EggReader::open(&self.data)
-        };
-        reader.map_err(|e| PyValueError::new_err(format!("egg parse error: {e}")))
+        format!(
+            "EggFile('{}', tables={}, encrypted={})",
+            filename,
+            self.snapshot.tables().len(),
+            if self.snapshot.header().flags.has_encryption() {
+                "True"
+            } else {
+                "False"
+            },
+        )
     }
 }
 

@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-store"
+version = "0.1.0"
+edition = "2021"
+description = "Crash-safe write log, snapshots, and compaction for .egg files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nazareneism/eggdb"
+
+[dependencies]
+eggdb-core = { path = "../eggdb-core" }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

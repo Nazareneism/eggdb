@@ -14,6 +14,10 @@ pub enum IoError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Opening an egg with its write log, or protecting a pending log, failed.
+    #[error("{0}")]
+    Store(#[from] eggdb_store::StoreError),
+
     #[error("{0}")]
     Other(String),
 }

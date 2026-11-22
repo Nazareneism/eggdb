@@ -172,6 +172,14 @@ enum Commands {
         passphrase: Option<String>,
     },
 
+    /// Fold pending changes (from INSERT/UPDATE/DELETE) into the main .egg file
+    Compact {
+        /// Path to the .egg file
+        egg: PathBuf,
+        /// Zstd compression level for changed tables (1-22, default: 3)
+        #[arg(long, default_value = "3")]
+        zstd_level: i32,
+    },
     /// Browse an .egg file in a local web viewer
     Web {
         /// Path to the .egg file
@@ -255,6 +263,7 @@ fn main() {
             passphrase,
         } => commands::relay::run(&egg, output.as_deref(), zstd_level, passphrase.as_deref()),
 
+        Commands::Compact { egg, zstd_level } => commands::compact::run(&egg, zstd_level),
         Commands::Web { egg, port } => commands::web::run(&egg, port),
     };
 

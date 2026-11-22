@@ -9,10 +9,14 @@ use axum::{Json, Router};
 use colored::Colorize;
 use serde::Serialize;
 
+use eggdb_store::EggSnapshot;
+
+use crate::commands::pending::open_snapshot;
 use crate::format::{format_ratio, format_size, format_timestamp};
 
 struct AppState {
-    egg_data: Vec<u8>,
+    /// Main file plus pending write-log changes, read once at startup.
+    snapshot: EggSnapshot,
     file_path: String,
     file_size: u64,
 }
@@ -20,12 +24,8 @@ struct AppState {
 pub fn run(egg: &Path, port: u16) -> Result<()> {
     anyhow::ensure!(egg.exists(), "egg file not found: {}", egg.display());
 
-    let data = std::fs::read(egg).with_context(|| format!("failed to read {}", egg.display()))?;
-    let file_size = data.len() as u64;
-
-    // Verify it's a valid egg
-    let _ = eggdb_core::EggReader::open(&data)
-        .with_context(|| format!("failed to parse {}", egg.display()))?;
+    let snapshot = open_snapshot(egg, None)?;
+    let file_size = snapshot.data().len() as u64;
 
     let file_name = egg
         .file_name()
@@ -33,7 +33,7 @@ pub fn run(egg: &Path, port: u16) -> Result<()> {
         .unwrap_or_else(|| egg.display().to_string());
 
     let state = Arc::new(AppState {
-        egg_data: data,
+        snapshot,
         file_path: file_name,
         file_size,
     });
@@ -123,10 +123,12 @@ async fn index_handler() -> Html<&'static str> {
 }
 
 async fn summary_handler(State(state): State<Arc<AppState>>) -> Json<SummaryResponse> {
-    let reader = eggdb_core::EggReader::open(&state.egg_data).expect("egg already validated");
+    let reader = &state.snapshot;
     let header = reader.header();
 
-    let total_rows: u64 = reader.tables().iter().map(|t| t.row_count).sum();
+    let total_rows: u64 = (0..reader.tables().len())
+        .map(|t| reader.live_row_count(t))
+        .sum();
 
     Json(SummaryResponse {
         file_path: state.file_path.clone(),
@@ -145,18 +147,19 @@ async fn summary_handler(State(state): State<Arc<AppState>>) -> Json<SummaryResp
 }
 
 async fn tables_handler(State(state): State<Arc<AppState>>) -> Json<Vec<TableSummary>> {
-    let reader = eggdb_core::EggReader::open(&state.egg_data).expect("egg already validated");
+    let reader = &state.snapshot;
 
     let tables: Vec<TableSummary> = reader
         .tables()
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(idx, t)| {
             let total_compressed: u64 = t.columns.iter().map(|c| c.yolk_length).sum();
             let total_uncompressed: u64 = t.columns.iter().map(|c| c.uncompressed_size).sum();
 
             TableSummary {
                 name: t.table_name.clone(),
-                row_count: t.row_count,
+                row_count: reader.live_row_count(idx),
                 column_count: t.columns.len(),
                 total_compressed_size: total_compressed,
                 total_uncompressed_size: total_uncompressed,
@@ -171,13 +174,12 @@ async fn table_detail_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<TableDetailResponse>, axum::http::StatusCode> {
-    let reader = eggdb_core::EggReader::open(&state.egg_data).expect("egg already validated");
+    let reader = &state.snapshot;
 
-    let table = reader
-        .tables()
-        .iter()
-        .find(|t| t.table_name == name)
+    let table_idx = reader
+        .table_index(&name)
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let table = &reader.tables()[table_idx];
 
     let columns: Vec<ColumnDetail> = table
         .columns
@@ -197,7 +199,7 @@ async fn table_detail_handler(
 
     Ok(Json(TableDetailResponse {
         name: table.table_name.clone(),
-        row_count: table.row_count,
+        row_count: reader.live_row_count(table_idx),
         ddl: table.original_ddl.clone(),
         columns,
     }))
@@ -207,7 +209,7 @@ async fn sample_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<SampleResponse>, axum::http::StatusCode> {
-    let reader = eggdb_core::EggReader::open(&state.egg_data).expect("egg already validated");
+    let reader = &state.snapshot;
 
     let (table_idx, table) = reader
         .tables()
@@ -217,11 +219,11 @@ async fn sample_handler(
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
 
     let column_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
-    let sample_count = std::cmp::min(table.row_count as usize, 100);
+    let sample_count = std::cmp::min(reader.live_row_count(table_idx) as usize, 100);
 
     // Decode all columns in parallel
     let decoded_columns = reader
-        .decode_all_columns_parallel(table_idx)
+        .visible_table(table_idx)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Transpose to rows, limited to sample_count
