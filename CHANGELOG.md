@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Write support** (v0.3, M12-M16): INSERT, UPDATE, and DELETE on `.egg` files without
+  hatching. See `docs/v0.3_plan.md`.
+  - Changes are appended to a crash-safe write log (`data.egg.wal`), one fsynced frame per
+    transaction; the main `.egg` (format v1) is never modified in place.
+  - Writable virtual table: `egg('<file>', '<table>', 'mode=rw')`, with transactions
+    (`BEGIN`/`COMMIT`/`ROLLBACK`; one frame per transaction even across tables), and
+    constraint enforcement through SQLite itself (NOT NULL, UNIQUE, PRIMARY KEY, CHECK,
+    type affinity, INTEGER PRIMARY KEY assignment, DEFAULT values).
+  - `egg compact`: folds the log into a new main file (validated before and after, atomic
+    rename, original permissions kept); unchanged tables are copied block-for-block.
+  - `egg query` / `egg shell` can edit: tables open writable; INSERT/UPDATE/DELETE print
+    the number of rows changed.
+  - Every read path includes pending changes: hatch, crack, info, candle, diff, validate,
+    relay, web viewer, Python bindings. `candle`/`info` show pending counts; `validate`
+    adds a `write_log` check.
+  - New crate `eggdb-store` (snapshots, single-writer lock, compaction, crash recovery).
+  - New core modules: `wal` (log format), `overlay` (merging changes with main-file rows),
+    `rebuild` (shared re-encode used by relay and compaction).
+  - Tests: model-based property test for overlays, crash-state recovery tests, differential
+    tests against plain SQLite, an end-to-end CLI test, and fuzz target `fuzz_wal_reader`
+    (3.7M runs, no crashes).
+  - Verified on `bible.eng.db` (1.5 GB, 1.5M rows): edits take 0.1-1.5 s per `egg query`,
+    compaction 5.2 s, and the result is row-for-row identical to SQLite given the same
+    edits (README "Benchmarks").
+- Loadable extension also exports `sqlite3_eggdbvtable_init`, so
+  `.load target/release/libeggdb_vtable` works without naming an entry point.
 - **Parallel column decoding** (M9): decode multiple columns concurrently using rayon.
   All hatch, crack, query, relay, and web viewer paths now decompress columns in
   parallel, providing multi-core speedup on tables with many columns.
@@ -16,6 +42,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Feature-gated behind `parallel` (on by default); `--no-default-features` compiles
     without rayon for single-threaded environments
   - Virtual table decodes only needed columns in parallel (column pruning preserved)
+
+### Changed
+
+- rusqlite 0.31 -> 0.40.2 (needed for virtual table transaction hooks).
+- Virtual table options may be named: `mode=ro|rw`, `passphrase=...`. A bare third
+  argument is still accepted as the passphrase.
+- `lay`, incremental `lay`, and `relay` refuse to overwrite an `.egg` that has pending
+  changes in a `.wal` file.
+- `relay` output includes pending write-log changes.
+
+### Fixed
+
+- `egg relay --passphrase` on an encrypted egg wrote a file that could not be decrypted
+  (old key reused with a new salt). The key is now re-derived for the new salt.
+- README build instructions for the loadable extension now include
+  `--features loadable_extension`.
 
 ## [0.1.0] - 2026-02-10
 

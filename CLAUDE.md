@@ -7,7 +7,8 @@ table extension to query them directly.
 ## Project Context
 
 - **Plan**: @docs/v0_plan.md (the authoritative spec — format, encodings, milestones, architecture)
-- **Language**: Rust (2021 edition), workspace with 4 crates
+- **Write support**: @docs/v0.3_plan.md (write log, compaction, writable vtable; supersedes the v0 roadmap sketch)
+- **Language**: Rust (2021 edition), workspace with 5 crates
 - **No deadline**: Side project. Correctness over speed. No shortcuts.
 
 ## Claude Code Configuration
@@ -30,6 +31,7 @@ table extension to query them directly.
 crates/
   eggdb-core/     # Format, encodings, value types. Zero IO, zero SQLite dependency.
   eggdb-io/       # SQLite ↔ .egg conversion (lay, hatch). Depends on rusqlite.
+  eggdb-store/    # Write log (.egg.wal) IO: snapshots, locked crash-safe appends, compaction.
   eggdb-vtable/   # SQLite virtual table extension (cdylib). Column pruning, filter push-down.
   eggdb-yql/      # YQL → SQL transpiler. Pure string transform, no external deps.
 src/              # CLI binary (clap). Thin wrappers around crate APIs.
@@ -38,9 +40,10 @@ src/              # CLI binary (clap). Thin wrappers around crate APIs.
 Crate boundaries are strict:
 - `eggdb-core` must never depend on `rusqlite`, `std::fs`, or any IO
 - `eggdb-yql` must never depend on any other eggdb crate
-- `eggdb-vtable` depends on `eggdb-core` only (not `eggdb-io`)
-- `eggdb-io` depends on `eggdb-core` and `rusqlite`
-- The CLI root crate depends on all four
+- `eggdb-store` depends on `eggdb-core` only (`std::fs` yes, `rusqlite` never)
+- `eggdb-vtable` depends on `eggdb-core` and `eggdb-store` (not `eggdb-io`)
+- `eggdb-io` depends on `eggdb-core`, `eggdb-store`, and `rusqlite`
+- The CLI root crate depends on all five
 
 ## .egg Format Quick Reference
 
@@ -67,7 +70,7 @@ Crate boundaries are strict:
 
 - Encoding types: `Const`, `BoolBitmap`, `Delta`, `Rle`, `Dict`, `Raw` (match the enum)
 - File format sections: shell (header), albumen (metadata), yolk (data), membrane (integrity)
-- CLI commands: `lay`, `hatch`, `candle`, `crack`, `query`, `info`, `validate`, `schema`, `diff`, `relay`, `shell`, `web`
+- CLI commands: `lay`, `hatch`, `candle`, `crack`, `query`, `info`, `validate`, `schema`, `diff`, `relay`, `shell`, `web`, `compact`
 - Use the egg metaphor in user-facing output and docs, not in internal code.
   Internal code uses descriptive names: `header`, `metadata`, `column_block`, `checksum`.
 
@@ -91,8 +94,9 @@ Crate boundaries are strict:
 ```
 eggdb-core:  serde, bincode (v1, pinned LE+varint), bitvec, zstd, crc32c, blake3,
              aes-gcm, argon2, rand, zeroize, thiserror
-eggdb-io:    rusqlite (bundled), thiserror, bitvec, zeroize
-eggdb-vtable: rusqlite (bundled, vtab feature), bitvec, thiserror, zeroize
+eggdb-store: eggdb-core, thiserror, zeroize
+eggdb-io:    rusqlite =0.40.2 (bundled), eggdb-store, thiserror, bitvec, zeroize
+eggdb-vtable: rusqlite =0.40.2 (bundled, vtab), eggdb-store, bitvec, thiserror, zeroize
 eggdb-yql:   thiserror
 CLI:         clap (derive), indicatif, comfy-table, colored, rustyline, rpassword,
              axum, tokio, tower-http, anyhow
@@ -105,9 +109,10 @@ cargo build                          # Build all crates
 cargo test                           # Run all tests
 cargo test -p eggdb-core             # Test one crate
 cargo clippy -- -D warnings          # Lint
-cargo build --release -p eggdb-vtable  # Build vtable as cdylib
+cargo build --release -p eggdb-vtable --features loadable_extension  # Loadable .dylib/.so
 cargo bench                          # Run benchmarks
-cargo fuzz run fuzz_egg_reader       # Fuzz the .egg reader
+cargo +nightly fuzz run fuzz_egg_reader   # Fuzz the .egg reader
+cargo +nightly fuzz run fuzz_wal_reader   # Fuzz the write log parser + replay
 ```
 
 ## Things to Remember
@@ -120,3 +125,14 @@ cargo fuzz run fuzz_egg_reader       # Fuzz the .egg reader
 - bincode config is tied to format version, not header flags. Flags are runtime-only.
 - `between ... and ...` in YQL is a single ternary keyword, not two `and` conditions.
 - Row order is preserved by default (flag bit 1 = 1). `--optimize-order` is opt-in.
+- Writes never modify the main `.egg`. They append to `data.egg.wal` (one fsynced frame
+  per transaction); every reader merges it via `EggSnapshot`. Never read row data with
+  `EggReader` directly in a command: it ignores pending changes.
+- Rowid = physical position. Main rows are `[0, n)`, logged inserts follow; updates keep
+  their rowid; deleted rowids are never reused. Only `compact` renumbers.
+- The log header binds to the main file (header CRC + length). A log that does not match
+  is an error, never silently applied or dropped.
+- SQLite discards DEFAULTs declared in a vtab schema and never enforces vtab constraints;
+  `eggdb-vtable/src/constraints.rs` enforces them through a scratch in-memory SQLite.
+- `register_egg_module` gives each connection its own state: one SQL transaction on one
+  egg is one log frame, even across tables.

@@ -49,6 +49,15 @@ egg = eggdb.open("encrypted.egg", passphrase="secret")
 rows = egg.query("SELECT * FROM users LIMIT 5")
 ```
 
+### Pending edits
+
+Edits made with `egg query` / `egg shell` (or any SQLite client using
+`mode=rw`) are stored in a `.egg.wal` file until `egg compact` runs. The Python
+API reads them: `query()` results and `summary()["total_rows"]` include pending
+edits, as of when the file was opened. `columns()` statistics describe the
+compressed main file. The Python API itself is read-only; a write statement in
+`query()` fails with a "read-only" error.
+
 ## Development
 
 To build from source and test locally:

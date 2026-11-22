@@ -9,6 +9,7 @@ Feeds arbitrary input to parsers and readers to ensure they never panic.
 |------|----------------|
 | `fuzz_targets/fuzz_egg_reader.rs` | `EggReader::open()` and `open_with_passphrase()` with random bytes |
 | `fuzz_targets/fuzz_yql_parser.rs` | YQL `parse()`, `transpile()`, and `is_yql()` with random strings |
+| `fuzz_targets/fuzz_wal_reader.rs` | Write log `parse_wal()` + overlay `replay()`: raw bytes, valid header + raw bytes, and CRC-correct frames around random payloads |
 
 ## Requirements
 
@@ -23,10 +24,12 @@ cargo +nightly fuzz run fuzz_egg_reader
 
 # Fuzz the YQL parser
 cargo +nightly fuzz run fuzz_yql_parser
+cargo +nightly fuzz run fuzz_wal_reader
 
 # Time-limited run (60 seconds)
 cargo +nightly fuzz run fuzz_egg_reader -- -max_total_time=60
 cargo +nightly fuzz run fuzz_yql_parser -- -max_total_time=60
+cargo +nightly fuzz run fuzz_wal_reader -- -max_total_time=60
 
 # List all targets
 cargo +nightly fuzz list

@@ -800,6 +800,20 @@ datasets with low-cardinality columns where grouping improves RLE/Delta selectio
 | Hatch (.egg → SQLite) | 7.10s |
 | Validate (176 checks) | < 1s |
 
+### Write Support (v0.3)
+
+Same dataset, release build, 2026-11-22. Per-command times include process start
+and reading the 293 MB `.egg`. Track these for regressions.
+
+| Operation | Time |
+|-----------|------|
+| `egg query` edit: 1-row insert, 66-row update, 3,612-row delete | 0.1-0.2s |
+| `egg query` 1-row update in a 1.2M-row table | 1.2s |
+| `egg query` 31,086-row `INSERT ... SELECT` | 1.5s |
+| Hatch with 34,767 changed rows pending | 8.3s |
+| `egg compact` (5 of 11 tables re-encoded) | 5.2s |
+| Hatch after compaction | 7.0s |
+
 ### Encoding Micro-benchmarks
 
 100,000 values per run. Criterion benchmarks on Apple Silicon.
@@ -874,6 +888,12 @@ datasets with low-cardinality columns where grouping improves RLE/Delta selectio
   Homebrew formula (`brew install eggdb`).
 
 ### v0.3 — Write Support
+
+> **Superseded (2026-11-22)** by [`docs/v0.3_plan.md`](v0.3_plan.md), which is what was
+> built. A `.egg`-format buffer cannot be appended to (whole-file CRC, `write_egg` builds
+> one `Vec<u8>`), new albumen fields would force format v2, and two sidecars (`.wal` +
+> `.del`) cannot be updated atomically. The implementation uses one append-only,
+> row-oriented write log instead. The sketch below is kept for history.
 
 Write support follows an append + compaction model, similar to LSM-trees and
 columnar databases like ClickHouse. The key insight: writes go fast into a
@@ -1020,7 +1040,9 @@ egg gc <file.egg>                        # Compact + reclaim deleted rows
   adaptive based on column cardinality? Fixed is simpler; adaptive compresses
   better but complicates the format.
 
-- **Append buffer format**: Decided: reuse `.egg` format for the buffer (`.egg.wal`).
+- **Append buffer format**: Revised 2026-11-22: an append-only row log (`.egg.wal`), not the
+  `.egg` format. See `docs/v0.3_plan.md` ("Why Not the v0 Roadmap Sketch"). Original decision:
+  reuse `.egg` format for the buffer (`.egg.wal`).
   Simpler implementation, reuses existing reader/writer. Two files on disk is
   acceptable — the buffer is temporary and merged on compaction.
 

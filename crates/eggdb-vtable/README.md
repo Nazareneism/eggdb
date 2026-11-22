@@ -30,10 +30,38 @@ FROM users u JOIN orders o ON u.id = o.user_id
 GROUP BY u.name;
 ```
 
+### Writing
+
+Tables are read-only unless created with `mode=rw`:
+
+```sql
+CREATE VIRTUAL TABLE users USING egg('data.egg', 'users', 'mode=rw');
+
+INSERT INTO users (email, name) VALUES ('new@example.com', 'New');
+UPDATE users SET name = 'Renamed' WHERE id = 2;
+DELETE FROM users WHERE id = 3;
+
+BEGIN; ...; ROLLBACK;   -- undoes egg writes too
+```
+
+- Writes go to the write log (`data.egg.wal`); the `.egg` is never modified in place.
+  Run `egg compact data.egg` to fold them in.
+- The original table's rules are enforced exactly as SQLite does (NOT NULL, UNIQUE,
+  PRIMARY KEY, CHECK, type affinity, INTEGER PRIMARY KEY assignment, DEFAULTs).
+- One SQL transaction is one atomic log frame, even across several egg tables on the
+  same connection. One writer at a time; others get a "busy" error.
+- Rowids are physical positions: stable until `egg compact`. Explicit rowids in
+  INSERT and rowid changes in UPDATE are rejected.
+- Limits: no writes to encrypted eggs; conflict clauses (`OR REPLACE`, `ON CONFLICT`)
+  act as ABORT; an explicit NULL inserted into a column with a DEFAULT gets the default;
+  inside `BEGIN ... COMMIT`, a multi-row statement that fails partway keeps the rows it
+  already wrote (no `xSavepoint` support in rusqlite).
+
 ### Encrypted Files
 
 ```sql
--- Pass passphrase as third argument
+CREATE VIRTUAL TABLE users USING egg('encrypted.egg', 'users', 'passphrase=my_passphrase');
+-- The legacy form with a bare third argument also works:
 CREATE VIRTUAL TABLE users USING egg('encrypted.egg', 'users', 'my_passphrase');
 ```
 
@@ -83,15 +111,21 @@ Cross-type comparisons (e.g., Integer column vs Real value) skip push-down.
 
 | File | Purpose |
 |------|---------|
-| `lib.rs` | Module exports, feature-gated `sqlite3_eggvt_init` entry point |
-| `vtab.rs` | `EggTab` struct (VTab impl), `EggCursor`, xConnect/xBestIndex/xFilter/xNext/xColumn/xEof |
+| `lib.rs` | Module exports, feature-gated `sqlite3_eggvt_init` / `sqlite3_eggdbvtable_init` entry points |
+| `vtab.rs` | `EggTab` (VTab, UpdateVTab, TransactionVTab), `EggCursor`, xConnect/xBestIndex/xFilter/xUpdate |
+| `args.rs` | `USING egg(...)` argument parsing (`mode=`, `passphrase=`, legacy positional passphrase) |
+| `shared.rs` | Per-connection state shared by all tables of one egg: snapshot, transaction, validators |
+| `constraints.rs` | Write validation through a scratch in-memory SQLite (affinity, NOT NULL, CHECK, UNIQUE, DEFAULT) |
 | `column_cache.rs` | Lazy column decompression with caching |
 | `error.rs` | `VtableError` enum mapping to SQLite error codes |
 
 ## Architecture
 
-- Depends on `eggdb-core` only (not `eggdb-io`) — reads .egg data directly
-- `EggTab` stores `Arc<EggFileData>` to avoid self-referential borrowing
+- Depends on `eggdb-core` and `eggdb-store` (not `eggdb-io`)
+- `EggTab` holds `Arc<Mutex<SharedEgg>>`, shared by every egg table on the same connection
+  and file (registered through the module's per-connection aux data)
+- Scans merge logged changes over main-file rows; encoding-level filter masks are widened
+  so changed rows are never missed (SQLite re-checks every row: `omit = false`)
 - Uses standalone `read_column_block_from_parts()` and `decode_column_from_parts()` from eggdb-core
 - `idx_str` format for passing filter info: `cols:<hex>|<col>:<op>;<col>:<op>...`
 

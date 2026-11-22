@@ -18,7 +18,7 @@ Milestones M1-M8 are fully implemented and tested.
 
 ## Non-Goals (Explicitly Out of Scope)
 
-- Online writes or mutable `.egg` files
+- Online writes or mutable `.egg` files (added after v1 as v0.3 write support; see `docs/v0.3_plan.md`)
 - Multi-writer concurrency or transactional semantics
 - YQL joins or multi-table YQL
 - SQL execution engine (SQLite remains the query engine)

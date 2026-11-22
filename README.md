@@ -59,6 +59,14 @@ egg query mydata.egg "SELECT count(*) FROM users WHERE status = 'active'"
 # Or use YQL, a friendlier query syntax
 egg query mydata.egg "count users where status = 'active'"
 
+# Edit it directly (no decompression needed)
+egg query mydata.egg "INSERT INTO users (email, name) VALUES ('new@example.com', 'New')"
+egg query mydata.egg "UPDATE users SET status = 'inactive' WHERE id = 42"
+egg query mydata.egg "DELETE FROM users WHERE id = 7"
+
+# Fold the edits into the compressed file whenever convenient
+egg compact mydata.egg
+
 # Restore back to SQLite
 egg hatch mydata.egg -o restored.sqlite
 ```
@@ -89,12 +97,40 @@ egg info <file.egg> [--table name]          # Per-column compression stats
 egg validate <file.egg>                     # Verify all checksums
 egg schema <file.egg>                       # Print original DDL
 egg crack <file.egg> [--format csv|json]    # Export without SQLite rebuild
-egg query <file.egg> "<yql or sql>"         # Query via virtual table
-egg shell <file.egg>                        # Interactive YQL/SQL REPL
+egg query <file.egg> "<yql or sql>"         # Query or edit (INSERT/UPDATE/DELETE)
+egg shell <file.egg>                        # Interactive YQL/SQL REPL (can edit too)
+egg compact <file.egg>                      # Fold pending edits into the .egg
 egg diff <a.egg> <b.egg>                    # Compare two .egg files
 egg relay <file.egg> [-o output.egg]        # Re-analyze and re-encode
 egg web <file.egg> [--port 8080]            # Browse in a local web viewer
 ```
+
+## Editing an Egg
+
+You can insert, update, and delete rows without restoring the file to SQLite.
+
+- **Edits are saved immediately** to a small change journal next to your file
+  (`data.egg` gets a `data.egg.wal`). The compressed `data.egg` itself is never
+  modified while you edit, so a crash or power cut cannot damage it.
+- **Every command sees your edits**: `query`, `crack`, `hatch`, `info`, `candle`,
+  `diff`, `relay`, and the web viewer. `egg candle` shows how many changes are
+  pending.
+- **`egg compact` folds the journal into a fresh `.egg`** and removes it,
+  restoring full compression. Tables you did not edit are copied as-is.
+- **The table's rules are enforced** exactly like SQLite: `NOT NULL`, `UNIQUE`,
+  `PRIMARY KEY`, and `CHECK` violations are rejected, new rows get the next
+  `INTEGER PRIMARY KEY`, and omitted columns get their `DEFAULT`.
+- **Transactions work**: `BEGIN ... ROLLBACK` undoes edits, and one transaction
+  is saved all-or-nothing, even across several tables.
+- **To discard all pending edits**, move the `.wal` file aside (only before
+  running `egg compact`).
+
+Current limits: encrypted eggs are read-only; one writer at a time (a second
+writer gets a "being written by another process" error); `INSERT OR REPLACE`
+and `ON CONFLICT` act like a plain failing insert; an explicit `NULL` inserted
+into a column that has a `DEFAULT` gets the default (SQLite does not tell
+virtual tables which columns an `INSERT` named). Design and crash-safety
+details: [`docs/v0.3_plan.md`](docs/v0.3_plan.md).
 
 ### Advanced Options
 
@@ -223,7 +259,7 @@ Query `.egg` files directly from any SQLite client without decompressing:
 
 ```bash
 # Build the loadable extension
-cargo build --release -p eggdb-vtable
+cargo build --release -p eggdb-vtable --features loadable_extension
 ```
 
 ```sql
@@ -231,6 +267,12 @@ cargo build --release -p eggdb-vtable
 
 CREATE VIRTUAL TABLE users USING egg('data.egg', 'users');
 CREATE VIRTUAL TABLE orders USING egg('data.egg', 'orders');
+
+-- Tables are read-only unless created with mode=rw
+CREATE VIRTUAL TABLE notes USING egg('data.egg', 'notes', 'mode=rw');
+INSERT INTO notes (body) VALUES ('edited from any SQLite client');
+
+-- Encrypted eggs: egg('data.egg', 'users', 'passphrase=...')
 
 -- Only the 'status' column is decompressed (column pruning)
 SELECT count(*) FROM users WHERE status = 'active';
@@ -312,6 +354,7 @@ find products where price between 10 and 50
 crates/
   eggdb-core/     Zero IO. Format, encodings, value types, encryption.
   eggdb-io/       SQLite <-> .egg conversion (lay, hatch). Depends on rusqlite.
+  eggdb-store/    Write log (.egg.wal): snapshots, crash-safe locked writes, compaction.
   eggdb-vtable/   SQLite virtual table extension (cdylib). Column pruning, filter push-down.
   eggdb-yql/      YQL -> SQL transpiler. Pure string transform, no external deps.
 src/              CLI binary (clap). Thin wrappers around crate APIs.
@@ -321,7 +364,8 @@ python/           Python package (PyO3 + maturin). uv pip install eggdb.
 Crate boundaries are strict:
 - `eggdb-core` has no IO dependencies (no rusqlite, no std::fs)
 - `eggdb-yql` has no dependencies on other eggdb crates
-- `eggdb-vtable` depends on `eggdb-core` only (not eggdb-io)
+- `eggdb-store` depends on `eggdb-core` only (no rusqlite)
+- `eggdb-vtable` depends on `eggdb-core` and `eggdb-store` (not eggdb-io)
 
 ## Benchmarks
 
@@ -338,8 +382,25 @@ Measured on `bible.eng.db` (1.5 GB SQLite, 11 tables, 1,497,017 rows). Apple Sil
 |-----------|------|
 | Hatch (.egg -> SQLite) | 6.3s |
 | Validate (176 checks) | 0.09s |
-| Test suite (unit + property + integration) | 470 tests |
-| Fuzz (egg reader + YQL parser) | ~6M inputs, 0 crashes |
+| Test suite (unit + property + integration) | 530 tests |
+| Fuzz (egg reader + YQL parser + write log) | ~9M inputs, 0 crashes |
+
+Write support on the same dataset. Each edit is one `egg query` command; times
+include starting the program and reading the 293 MB `.egg`.
+
+| Operation | Result |
+|-----------|--------|
+| INSERT 1 row, UPDATE 66 rows, or DELETE 3,612 rows | 0.1-0.2s each |
+| UPDATE 1 row in a 1.2M-row table | 1.2s |
+| Bulk `INSERT ... SELECT` of 31,086 rows | 1.5s (15 MB write log) |
+| `egg validate` with those changes pending (177 checks) | 0.17s |
+| Hatch with changes pending | 8.3s |
+| `egg compact` (5 changed tables re-encoded, 6 copied as-is) | 5.2s, 293 MB -> 295 MB |
+| Hatch after compaction | 7.0s |
+
+The same edits were applied to a plain SQLite copy of the database. Hatched
+before and after compaction, all 11 tables (1,524,492 rows) were identical to it
+row by row, including value types.
 
 Encoding micro-benchmarks (100K values, Criterion):
 
@@ -402,19 +463,21 @@ Fuzz testing requires the nightly toolchain (`rustup install nightly`).
 - **npm package** — distribute the SQLite extension for Node.js/Bun/Deno
 - **Homebrew formula** — `brew install eggdb`
 
-### Future (v0.3) — Write Support
+### Done (v0.3) — Write Support
 
-Write support is the most-requested feature. Columnar formats are inherently
-read-optimized, so writes use an append + compaction model:
+Built ahead of v0.2. Columnar formats are read-optimized, so writes use an
+append + compaction model (design: [`docs/v0.3_plan.md`](docs/v0.3_plan.md)):
 
-- **Append mode** — add new rows to a sidecar buffer without re-encoding the main
-  file. `egg relay` merges the buffer back in (compaction).
-- **Delete bitmaps** — mark rows as deleted without rewriting column data. Compaction
-  reclaims space. Queries skip deleted rows automatically.
-- **Schema evolution** — add a nullable column without rewriting existing data.
-  The new column is stored as all-null until the next compaction.
-- **Write-through virtual table** — `INSERT`/`UPDATE`/`DELETE` on egg vtables,
-  built on append mode + delete bitmaps. Updates = delete old row + append new row.
+- **Write log** — INSERT/UPDATE/DELETE are appended to a crash-safe sidecar
+  (`data.egg.wal`); the compressed `.egg` is never modified in place
+- **Writable virtual table** — `egg query`, `egg shell`, or any SQLite client with
+  `mode=rw`; transactions, and the source table's constraints are enforced
+- **`egg compact`** — folds the log into a new `.egg`, copying unchanged tables as-is
+- **Every command sees pending changes** — hatch, crack, info, candle, diff,
+  validate, relay, web viewer, Python bindings
+
+Still to come: schema evolution (add/drop/rename columns), writes to encrypted
+eggs, automatic compaction, and writes from the Python package.
 
 ### Exploring
 
