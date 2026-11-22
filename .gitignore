@@ -50,6 +50,12 @@ tests/fixtures/*.egg
 
 # Generated test outputs
 *.egg
+*.egg.wal
+*.egg.compact-tmp
+
+# Local datasets and hatch output at the repo root (large, never committed)
+/*.db
+/*.sqlite
 
 # AI Web Search Reports
 docs/reports
