@@ -105,7 +105,9 @@ Enter SQL or YQL queries (empty line to quit):
 ## Requirements
 
 - **Python 3.9+** (CPython only)
-- **Platforms**: Linux (x86_64, aarch64), macOS (Apple Silicon, Intel)
+- **Platforms**: prebuilt wheels for Linux (x86_64, aarch64), macOS (Apple Silicon,
+  Intel), and Windows (x64, ARM64), from 0.2.1. Elsewhere pip builds from source,
+  which needs the Rust toolchain (and on Windows, Visual C++ Build Tools).
 - **Memory**: The entire `.egg` file is loaded into memory when opened. For a 300 MB
   `.egg` file, expect ~300 MB of RAM usage. Plan accordingly for multi-GB files.
 

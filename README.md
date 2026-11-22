@@ -129,8 +129,10 @@ Current limits: encrypted eggs are read-only; one writer at a time (a second
 writer gets a "being written by another process" error); `INSERT OR REPLACE`
 and `ON CONFLICT` act like a plain failing insert; an explicit `NULL` inserted
 into a column that has a `DEFAULT` gets the default (SQLite does not tell
-virtual tables which columns an `INSERT` named). Design and crash-safety
-details: [`docs/v0.3_plan.md`](docs/v0.3_plan.md).
+virtual tables which columns an `INSERT` named). On Windows, file locks also
+block reading, so while one program has a write transaction open, another
+program opening the same egg gets a "file is locked" error until it finishes.
+Design and crash-safety details: [`docs/v0.3_plan.md`](docs/v0.3_plan.md).
 
 ### Advanced Options
 
