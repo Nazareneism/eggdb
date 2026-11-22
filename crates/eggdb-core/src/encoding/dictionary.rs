@@ -35,8 +35,9 @@ impl ColumnEncoder for DictEncoder {
             }
         }
 
-        // Sort by frequency descending (most common = index 0 = smallest varint)
-        freq.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by frequency descending (most common = index 0 = smallest varint).
+        // Stable sort: ties keep first-seen order, so output is deterministic.
+        freq.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let dictionary: Vec<Value> = freq.into_iter().map(|(v, _)| v).collect();
 
