@@ -195,23 +195,27 @@ pub fn validate_with_key(
                     }
 
                     let col = &tables[ti].columns[ci];
-                    let yolk_start = header.yolk_offset as usize;
-                    let block_start = yolk_start + col.yolk_offset as usize;
-                    let block_end = block_start + col.yolk_length as usize;
-
-                    if block_end > data.len() {
+                    let Some(block) = crate::format::checked_range(
+                        header.yolk_offset,
+                        col.yolk_offset,
+                        col.yolk_length,
+                        data.len(),
+                    ) else {
                         results.push(ValidationResult {
                             check: check_name,
                             passed: false,
                             detail: format!(
-                                "block [{block_start}..{block_end}] exceeds file size {}",
+                                "block at yolk {} + {} (length {}) exceeds file size {}",
+                                header.yolk_offset,
+                                col.yolk_offset,
+                                col.yolk_length,
                                 data.len()
                             ),
                         });
                         continue;
-                    }
+                    };
 
-                    let computed = crc32c::crc32c(&data[block_start..block_end]);
+                    let computed = crc32c::crc32c(&data[block]);
                     let passed = computed == bc.crc32c;
                     results.push(ValidationResult {
                         check: check_name,

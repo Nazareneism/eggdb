@@ -43,17 +43,22 @@ pub fn read_column_block_from_parts_with_key(
     encryption_key: Option<&[u8; 32]>,
 ) -> Result<(BitVec, Vec<u8>), FormatError> {
     let row_count = row_count as usize;
-    let block_start = yolk_section_offset as usize + col_meta.yolk_offset as usize;
-    let block_end = block_start + col_meta.yolk_length as usize;
-
-    if block_end > file_data.len() {
-        return Err(FormatError::InvalidOffset(format!(
-            "column block [{block_start}..{block_end}] exceeds file size {}",
+    let block = crate::format::checked_range(
+        yolk_section_offset,
+        col_meta.yolk_offset,
+        col_meta.yolk_length,
+        file_data.len(),
+    )
+    .ok_or_else(|| {
+        FormatError::InvalidOffset(format!(
+            "column block at yolk {yolk_section_offset} + {} (length {}) exceeds file size {}",
+            col_meta.yolk_offset,
+            col_meta.yolk_length,
             file_data.len()
-        )));
-    }
+        ))
+    })?;
 
-    let stored_data = &file_data[block_start..block_end];
+    let stored_data = &file_data[block];
 
     // Handle empty blocks (0 rows)
     if stored_data.is_empty() {
@@ -203,17 +208,19 @@ impl<'a> EggReader<'a> {
         }
 
         // Read salt from the start of the yolk section
-        let yolk_start = header.yolk_offset as usize;
-        let salt_end = yolk_start + crate::format::crypto::SALT_SIZE;
-        if salt_end > data.len() {
-            return Err(FormatError::InvalidOffset(format!(
-                "yolk section too short for encryption salt: need {salt_end} bytes, file is {}",
-                data.len()
-            )));
-        }
+        let salt_size = crate::format::crypto::SALT_SIZE;
+        let salt_range =
+            crate::format::checked_range(header.yolk_offset, 0, salt_size as u64, data.len())
+                .ok_or_else(|| {
+                    FormatError::InvalidOffset(format!(
+                        "yolk section too short for encryption salt: yolk at {}, file is {} bytes",
+                        header.yolk_offset,
+                        data.len()
+                    ))
+                })?;
 
         let mut salt = [0u8; crate::format::crypto::SALT_SIZE];
-        salt.copy_from_slice(&data[yolk_start..salt_end]);
+        salt.copy_from_slice(&data[salt_range]);
 
         let key = crate::format::crypto::derive_key(passphrase, &salt)?;
 
@@ -810,5 +817,59 @@ mod tests {
             err,
             FormatError::InvalidOffset(_) | FormatError::Bincode(_)
         ));
+    }
+
+    /// Regression (found by fuzz_egg_reader in CI): an encrypted header whose
+    /// yolk offset is near u64::MAX made the salt-range addition overflow and
+    /// panic. It must be an error.
+    #[test]
+    fn huge_yolk_offset_in_encrypted_header_is_an_error_not_a_panic() {
+        let header = Header {
+            magic: Header::MAGIC,
+            version: Header::CURRENT_VERSION,
+            table_count: 0,
+            flags: crate::format::header::HeaderFlags::new(true, true),
+            created_at: 0,
+            original_size: 0,
+            albumen_offset: 64,
+            yolk_offset: u64::MAX,
+            membrane_offset: 64,
+            checksum: 0,
+        };
+        let data = header.to_bytes();
+        let err = EggReader::open_with_passphrase(&data, "pw").unwrap_err();
+        assert!(matches!(err, FormatError::InvalidOffset(_)), "{err}");
+    }
+
+    /// Column offsets come from untrusted metadata; overflowing ones must be
+    /// an error, not a panic or a wrapped-around read.
+    #[test]
+    fn overflowing_column_block_range_is_an_error() {
+        let col = make_column(
+            "c",
+            SqliteType::Integer,
+            &[Value::Integer(1)],
+            Encoding::Raw,
+        );
+        let data = write_egg(
+            &[TableInput {
+                table_name: "t".into(),
+                row_count: 1,
+                original_ddl: "CREATE TABLE t (c INTEGER)".into(),
+                columns: vec![col],
+                index_definitions: vec![],
+            }],
+            &WriteOptions::default(),
+        )
+        .unwrap();
+        let reader = EggReader::open(&data).unwrap();
+        let mut meta = reader.tables()[0].columns[0].clone();
+        for (offset, length) in [(u64::MAX, 1), (1, u64::MAX), (u64::MAX - 3, 8)] {
+            meta.yolk_offset = offset;
+            meta.yolk_length = length;
+            let err = read_column_block_from_parts(&data, reader.header().yolk_offset, &meta, 1)
+                .unwrap_err();
+            assert!(matches!(err, FormatError::InvalidOffset(_)), "{err}");
+        }
     }
 }

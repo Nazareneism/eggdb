@@ -83,6 +83,25 @@ pub enum FormatError {
     WriteLog(String),
 }
 
+/// The byte range `[base + offset, base + offset + len)` if it lies entirely
+/// inside a file of `file_len` bytes.
+///
+/// Offsets and lengths come from untrusted headers and metadata, so every
+/// addition is checked: an overflow or an out-of-file range is `None`, never
+/// a panic or a wrapped-around read.
+#[must_use]
+pub fn checked_range(
+    base: u64,
+    offset: u64,
+    len: u64,
+    file_len: usize,
+) -> Option<std::ops::Range<usize>> {
+    let start = base.checked_add(offset)?;
+    let end = start.checked_add(len)?;
+    let (start, end) = (usize::try_from(start).ok()?, usize::try_from(end).ok()?);
+    (end <= file_len).then_some(start..end)
+}
+
 /// Returns the bincode configuration for format version 1.
 ///
 /// Version 1 uses little-endian byte order and varint integer encoding.
@@ -92,4 +111,23 @@ pub fn bincode_config() -> impl bincode::Options {
     bincode::options()
         .with_little_endian()
         .with_varint_encoding()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_range;
+
+    #[test]
+    fn checked_range_accepts_ranges_inside_the_file() {
+        assert_eq!(checked_range(10, 5, 3, 18), Some(15..18));
+        assert_eq!(checked_range(0, 0, 0, 0), Some(0..0));
+    }
+
+    #[test]
+    fn checked_range_rejects_overflow_and_out_of_file() {
+        assert_eq!(checked_range(u64::MAX, 1, 0, usize::MAX), None);
+        assert_eq!(checked_range(1, u64::MAX, 0, usize::MAX), None);
+        assert_eq!(checked_range(0, 1, u64::MAX, usize::MAX), None);
+        assert_eq!(checked_range(10, 5, 4, 18), None, "one byte past the end");
+    }
 }

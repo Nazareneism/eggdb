@@ -20,6 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - macOS wheels are built on `macos-15` (GitHub retired the `macos-14` runners).
 
+### Fixed
+
+- A malformed `.egg` with an extreme offset in its header or column metadata crashed
+  (integer overflow) instead of returning an error: when opening an encrypted egg,
+  reading a column block, and in `egg validate`. Found by `fuzz_egg_reader`. Offset
+  arithmetic on file input now goes through one overflow-checked helper.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

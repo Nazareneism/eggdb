@@ -52,13 +52,14 @@ pub fn run(egg: &Path, passphrase: Option<&str>) -> Result<()> {
             .with_context(|| format!("failed to parse {}", egg.display()))?;
         let header = reader.header();
         if header.flags.has_encryption() {
-            let salt_start = header.yolk_offset as usize;
-            let salt_end = salt_start + eggdb_core::SALT_SIZE;
-            anyhow::ensure!(
-                salt_end <= data.len(),
-                "egg file too short for encryption salt"
-            );
-            let salt: [u8; 16] = data[salt_start..salt_end].try_into().unwrap();
+            let salt_range = eggdb_core::format::checked_range(
+                header.yolk_offset,
+                0,
+                eggdb_core::SALT_SIZE as u64,
+                data.len(),
+            )
+            .ok_or_else(|| anyhow::anyhow!("egg file too short for encryption salt"))?;
+            let salt: [u8; 16] = data[salt_range].try_into().unwrap();
             let key =
                 eggdb_core::derive_key(pass, &salt).context("failed to derive encryption key")?;
             Some(key)
