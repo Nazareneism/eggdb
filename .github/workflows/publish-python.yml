@@ -13,6 +13,8 @@ jobs:
     name: Build wheels (${{ matrix.os }} ${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # Report every platform in one run. Publishing still requires all to pass.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest

@@ -10,7 +10,7 @@ name = "_eggdb"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "generate-import-lib"] }
 eggdb-core = { path = "../crates/eggdb-core" }
 eggdb-store = { path = "../crates/eggdb-store" }
 eggdb-vtable = { path = "../crates/eggdb-vtable" }
