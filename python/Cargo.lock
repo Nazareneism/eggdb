@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-core",
  "eggdb-store",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eggdb-core",
  "thiserror",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-vtable"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitvec",
  "eggdb-core",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "eggdb-yql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]

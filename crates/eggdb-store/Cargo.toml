@@ -1,6 +1,6 @@
 [package]
 name = "eggdb-store"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Crash-safe write log, snapshots, and compaction for .egg files"
 license = "MIT OR Apache-2.0"

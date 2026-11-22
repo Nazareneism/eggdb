@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Added
 
 - **Write support** (v0.3, M12-M16): INSERT, UPDATE, and DELETE on `.egg` files without
